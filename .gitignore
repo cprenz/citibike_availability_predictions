@@ -1,0 +1,51 @@
+# --- Secrets ---
+.env
+data_ingestion/.env
+
+# --- Internal / personal notes (not for public repo) ---
+HANDOFF_PLAN.md
+HANDOFF_PLAN_2.md
+
+# --- Python ---
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# --- Virtual environments ---
+venv/
+.venv/
+env/
+data_ingestion/venv/
+
+# --- Logs ---
+*.log
+
+# --- Large / raw data (too big for GitHub) ---
+trip_zips/
+data/raw/
+data/interim/
+*.zip
+*.csv
+
+# --- Checkpoints ---
+*checkpoint*.txt
+*checkpoint*.log
+
+# --- Trained models ---
+models/
+*.joblib
+*.pkl
+
+# --- Editor / OS ---
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+.wslconfig
+
+# --- Notebooks ---
+.ipynb_checkpoints/
