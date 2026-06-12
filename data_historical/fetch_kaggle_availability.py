@@ -23,6 +23,36 @@ load_dotenv(os.path.join(os.path.dirname(__file__), '..', 'data_ingestion', '.en
 # Checkpoints completed files — safe to resume if interrupted (re-run same command).
 # Skips 2020 rows (COVID anomaly).
 # 2016-2017 rows will have num_ebikes_available = NULL (e-bikes didn't exist yet).
+#
+# ---------------------------------------------------------------------------
+# Source-data quirks this loader had to handle (kept here so the script's shape
+# makes sense and the same gotchas are easy to spot if the loader is re-run or
+# adapted to a new dataset):
+#
+# 1. Timestamp column name — the Kaggle CSVs call it `station_status_last_reported`,
+#    not `last_reported`/`fetched_at`. Mapped via COLUMN_MAP.
+# 2. `\N` nulls — CSVs use PostgreSQL-dump `\N` for nulls; pandas reads them as the
+#    literal string "\N". Handled with na_values=[r'\N'] in pd.read_csv().
+# 3. Unix-seconds timestamps — `station_status_last_reported` is Unix seconds
+#    (e.g. 1547045888). pd.to_datetime defaults to nanoseconds → 1970 dates.
+#    Parse with unit='s', utc=True when the column is numeric.
+# 4. Boolean columns as floats — a bool column with NaN becomes float64
+#    (1.0/0.0/NaN); execute_values can't cast float→bool. Map to
+#    None if pd.isna(x) else ('t' if x else 'f') before COPY.
+# 5. Integer columns as floats — int column with NaN becomes float64; COPY rejects
+#    "0.0" for an INTEGER column. Map to '' if pd.isna(x) else str(int(x)).
+# 6. Duplicate (fetched_at, station_id) rows exist in the source CSVs, so a direct
+#    COPY into station_status_pre2021 hits UniqueViolation. Fixed with a staging
+#    table: COPY into UNLOGGED _tmp_kaggle_load, then
+#    INSERT ... SELECT DISTINCT ON (fetched_at, station_id) ... ON CONFLICT DO NOTHING.
+# 7. Entry point — needs an `if __name__ == '__main__': main()` guard, or the script
+#    runs silently (exit 0) and does nothing.
+# 8. Stale .pyc — a cached __pycache__ .pyc once masked an edited version of this
+#    script; delete the .pyc if edits appear to have no effect.
+# 9. Duplicate background processes — verify/kill old runs by PID (e.g.
+#    Get-WmiObject Win32_Process) before starting a new one; an un-killed earlier
+#    run was inserting bad data alongside the fixed run.
+# ---------------------------------------------------------------------------
 
 CHUNK_SIZE = 100_000
 SKIP_YEARS = {2020}
