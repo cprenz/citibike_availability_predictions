@@ -1,30 +1,36 @@
 """Phase 2 — build the training_features table.
 
-Architecture: this script is a thin ORCHESTRATOR. It loops over the training
-period one month at a time and runs INSERT ... SELECT statements that compute
-every feature INSIDE the database (TimescaleDB). Data is never pulled into
-pandas — the 334M-row status archive is far too large for that, and Timescale
-is purpose-built for the time-window / lag work.
+Architecture (post-2026-06-14 pivot): this builder reads from the cleaned,
+hourly-sampled table `station_status_hourly_clean` — NOT the raw 334M-row
+archive. The cleaning + hourly point-sampling already happened upstream in
+model_training/build_clean_availability.py, so this script only assembles
+features (lags, weather, static, demand, targets) and never re-cleans anything.
+
+It is still a SQL orchestrator (INSERT ... SELECT run in-DB). The eventual full
+pivot re-expresses the feature math in pandas with a month+buffer load; until
+then this SQL path works against the clean table and is the simplest thing that
+produces correct rows for horizons >= 1 hour.
 
 Per month the builder:
-  1. Picks the right source tables (pre-2021 vs post-2021) and SKIPS the
-     2022-April 2026 availability gap, where lag features can't be computed.
-  2. Samples one snapshot per (station_id, hour)  -> the "base" rows.
+  1. Picks the weather tables by era (pre-2021 vs post-2021) and SKIPS the
+     2022-April 2026 gap + 2020 (no clean rows exist there anyway).
+  2. Reads the already-hourly base rows straight from station_status_hourly_clean
+     (no sampling needed — one row per station-hour by construction).
   3. Computes lags, observed weather, static, and demand features once.
   4. For each horizon, writes target + horizon-matched forecast weather.
 
+HOURLY-DATA CONSEQUENCES (the clean table has no sub-hourly resolution):
+  - rate_of_change_10min/20min/30min are NULL here — they need sub-hourly data.
+    Compute them in the clean stage from raw if you want them back.
+  - The 10-minute horizon is SKIPPED — the smallest buildable horizon is 1 hour.
+
 Idempotent: the table PK is (station_id, timestamp, horizon_minutes) and all
-inserts use ON CONFLICT DO NOTHING, so re-running a month is safe. This is what
-makes the monthly retrain pipeline (Phase 3) just an append.
+inserts use ON CONFLICT DO NOTHING, so re-running a month is safe.
 
 Usage (run from project root so `citibike` imports):
     python model_training/build_training_features.py --start 2016-01 --end 2021-12
     python model_training/build_training_features.py --start 2026-05 --end 2026-06
     python model_training/build_training_features.py --create-only   # just DDL
-
-Validate on a SMALL window first (e.g. one month) and eyeball the output before
-launching the full multi-year backfill — the lag/forecast SQL is the expensive,
-correctness-critical part.
 """
 
 import argparse
@@ -41,13 +47,14 @@ from citibike.config import DB_CONFIG, HORIZONS_MINUTES  # noqa: E402
 
 DDL_PATH = Path(__file__).resolve().parents[1] / "sql" / "training_features.sql"
 
-# One base row per station per this interval. Hourly keeps the table tractable:
-# ~1,500 stations * 24h * 30d * 7 horizons ~= 7.5M rows/month. Going finer
-# (e.g. '15 minutes') multiplies the row count and the build time accordingly.
-SAMPLE_INTERVAL = "1 hour"
+# Source of availability: the cleaned, hourly-sampled table (one row/station/hour).
+CLEAN_TBL = "station_status_hourly_clean"
 
-# The availability gap: no raw status snapshots exist here, so lag features are
-# impossible. Months that start inside this range are skipped entirely.
+# Horizons below this can't be built from hourly data (no sub-hourly snapshots).
+MIN_HOURLY_HORIZON_MIN = 60
+
+# The availability gap: no clean rows exist here (the clean stage skipped it), so
+# months starting inside this range are skipped — nothing to build.
 GAP_START = date(2022, 1, 1)
 GAP_END = date(2026, 5, 1)  # exclusive — May 2026 onward has live status data
 
@@ -64,21 +71,23 @@ def create_table(conn):
 
 
 def sources_for_month(month_start: date):
-    """Return the (status, observed_weather, forecast_weather) tables for a month,
-    or None if the month falls in the un-backfillable gap or is excluded (2020)."""
+    """Return the (observed_weather, forecast_weather) tables for a month, or None
+    if the month falls in the un-backfillable gap or is excluded (2020).
+
+    The availability source is always CLEAN_TBL (both eras are merged into it);
+    only the WEATHER tables still differ by era.
+    """
     if GAP_START <= month_start < GAP_END:
-        return None  # 2022-April 2026 — only trip aggregates exist, no snapshots
+        return None  # 2022-April 2026 — no clean rows
     if month_start.year == 2020:
         return None  # COVID anomaly, excluded from training per project spec
 
     if month_start.year <= 2021:
         return (
-            "station_status_pre2021",
             "weather_pre2021_era5_observed",
             "weather_pre2021_gfs_forecast",
         )
     return (
-        "station_status",
         "weather_post2021_openmeteo_observed",
         "weather_post2021_openmeteo_forecast",
     )
@@ -92,36 +101,21 @@ def months_between(start: date, end: date):
         cur += relativedelta(months=1)
 
 
-def build_base_table(conn, status_tbl, observed_tbl, m_start, m_end):
-    """Create a per-month temp table of sampled base rows plus all horizon-
-    INDEPENDENT features (current availability, lags, observed weather, static,
-    demand). Horizon-dependent columns (target, forecast) are added later.
+def build_base_table(conn, observed_tbl, m_start, m_end):
+    """Create a per-month temp table of base rows plus all horizon-INDEPENDENT
+    features (current availability, lags, observed weather, static, demand).
+    Horizon-dependent columns (target, forecast) are added later.
 
-    NOTE: the lag/rate-of-change SQL below uses LATERAL lookups against the
-    (station_id, fetched_at DESC) index. Verify EXPLAIN on a single month before
-    a full backfill — this is the hot path over the 334M-row archive.
+    Reads straight from CLEAN_TBL — already one row per (station_id, hour), so no
+    sampling CTE is needed. Lag lookups use the (station_id, hour DESC) index and
+    tolerate gaps by taking the most recent clean row at/before the lag time.
     """
     sql = f"""
     DROP TABLE IF EXISTS _tf_base;
     CREATE TEMP TABLE _tf_base AS
-    WITH sampled AS (
-        -- one snapshot per station per SAMPLE_INTERVAL bucket
-        SELECT DISTINCT ON (station_id, time_bucket('{SAMPLE_INTERVAL}', fetched_at))
-            station_id,
-            fetched_at AS ts,
-            num_bikes_available,
-            num_ebikes_available,
-            num_docks_available,
-            num_bikes_disabled
-        FROM {status_tbl}
-        WHERE fetched_at >= %(m_start)s AND fetched_at < %(m_end)s
-        ORDER BY station_id,
-                 time_bucket('{SAMPLE_INTERVAL}', fetched_at),
-                 fetched_at DESC
-    )
     SELECT
         s.station_id,
-        s.ts,
+        s.hour AS ts,
         s.num_bikes_available,
         s.num_ebikes_available,
         s.num_docks_available,
@@ -130,29 +124,31 @@ def build_base_table(conn, status_tbl, observed_tbl, m_start, m_end):
         -- capacity-normalized availability (stationary, comparable across stations).
         -- Normalize by capacity (a fixed positive constant) NOT by the prior count,
         -- so it stays zero-safe when a dock is empty. NULLIF guards capacity = 0.
-        s.num_bikes_available::numeric / NULLIF(si.capacity, 0) AS fill_ratio,
+        -- capacity is frozen into the clean table, so no station_information join.
+        s.num_bikes_available::numeric / NULLIF(s.capacity, 0) AS fill_ratio,
         (s.num_bikes_available - lag1.num_bikes_available)::numeric
-            / NULLIF(si.capacity, 0) AS fill_ratio_change_1hr,
-        roll6.avg_bikes / NULLIF(si.capacity, 0) AS rolling_mean_fill_ratio_6hr,
+            / NULLIF(s.capacity, 0) AS fill_ratio_change_1hr,
+        roll6.avg_bikes / NULLIF(s.capacity, 0) AS rolling_mean_fill_ratio_6hr,
 
-        -- lag lookups: latest snapshot at/just before (ts - interval)
+        -- lag lookups: latest clean snapshot at/just before (ts - interval)
         lag1.num_bikes_available  AS bikes_1hr_ago,
         lag3.num_bikes_available  AS bikes_3hr_ago,
         lag6.num_bikes_available  AS bikes_6hr_ago,
         lag12.num_bikes_available AS bikes_12hr_ago,
         lagyday.num_bikes_available AS bikes_same_hour_yesterday,
 
-        -- rate of change (bikes per minute) over short windows
-        (s.num_bikes_available - r10.num_bikes_available) / 10.0 AS rate_of_change_10min,
-        (s.num_bikes_available - r20.num_bikes_available) / 20.0 AS rate_of_change_20min,
-        (s.num_bikes_available - r30.num_bikes_available) / 30.0 AS rate_of_change_30min,
+        -- rate of change over sub-hourly windows: NOT computable from hourly clean
+        -- data. NULL here; compute in the clean stage from raw if you want them.
+        NULL::double precision AS rate_of_change_10min,
+        NULL::double precision AS rate_of_change_20min,
+        NULL::double precision AS rate_of_change_30min,
 
-        -- observed weather, truncated to the hour
+        -- observed weather, matched on the hour
         w.temperature_2m, w.apparent_temperature, w.precipitation, w.rain,
         w.snowfall, w.wind_speed_10m, w.cloud_cover, w.relative_humidity_2m,
 
-        -- station static
-        si.capacity,
+        -- station static (capacity from the clean table; the rest joined by id)
+        s.capacity,
         prox.nearest_entrance_dist_m, prox.entrance_count_400m,
         prox.entrance_count_800m, prox.is_within_400m,
         stf.member_ratio, stf.ebike_ratio, stf.station_role,
@@ -163,48 +159,39 @@ def build_base_table(conn, status_tbl, observed_tbl, m_start, m_end):
         dp.avg_departures AS avg_departures_this_hour_dow,
         dp.avg_arrivals   AS avg_arrivals_this_hour_dow,
         dp.avg_net_flow   AS avg_net_flow_this_hour_dow
-    FROM sampled s
-    LEFT JOIN LATERAL (SELECT num_bikes_available FROM {status_tbl} t
-        WHERE t.station_id = s.station_id AND t.fetched_at <= s.ts - INTERVAL '1 hour'
-        ORDER BY t.fetched_at DESC LIMIT 1) lag1 ON true
-    LEFT JOIN LATERAL (SELECT num_bikes_available FROM {status_tbl} t
-        WHERE t.station_id = s.station_id AND t.fetched_at <= s.ts - INTERVAL '3 hours'
-        ORDER BY t.fetched_at DESC LIMIT 1) lag3 ON true
-    LEFT JOIN LATERAL (SELECT num_bikes_available FROM {status_tbl} t
-        WHERE t.station_id = s.station_id AND t.fetched_at <= s.ts - INTERVAL '6 hours'
-        ORDER BY t.fetched_at DESC LIMIT 1) lag6 ON true
-    LEFT JOIN LATERAL (SELECT num_bikes_available FROM {status_tbl} t
-        WHERE t.station_id = s.station_id AND t.fetched_at <= s.ts - INTERVAL '12 hours'
-        ORDER BY t.fetched_at DESC LIMIT 1) lag12 ON true
-    LEFT JOIN LATERAL (SELECT num_bikes_available FROM {status_tbl} t
-        WHERE t.station_id = s.station_id AND t.fetched_at <= s.ts - INTERVAL '24 hours'
-        ORDER BY t.fetched_at DESC LIMIT 1) lagyday ON true
-    LEFT JOIN LATERAL (SELECT num_bikes_available FROM {status_tbl} t
-        WHERE t.station_id = s.station_id AND t.fetched_at <= s.ts - INTERVAL '10 minutes'
-        ORDER BY t.fetched_at DESC LIMIT 1) r10 ON true
-    LEFT JOIN LATERAL (SELECT num_bikes_available FROM {status_tbl} t
-        WHERE t.station_id = s.station_id AND t.fetched_at <= s.ts - INTERVAL '20 minutes'
-        ORDER BY t.fetched_at DESC LIMIT 1) r20 ON true
-    LEFT JOIN LATERAL (SELECT num_bikes_available FROM {status_tbl} t
-        WHERE t.station_id = s.station_id AND t.fetched_at <= s.ts - INTERVAL '30 minutes'
-        ORDER BY t.fetched_at DESC LIMIT 1) r30 ON true
+    FROM {CLEAN_TBL} s
+    LEFT JOIN LATERAL (SELECT num_bikes_available FROM {CLEAN_TBL} t
+        WHERE t.station_id = s.station_id AND t.hour <= s.hour - INTERVAL '1 hour'
+        ORDER BY t.hour DESC LIMIT 1) lag1 ON true
+    LEFT JOIN LATERAL (SELECT num_bikes_available FROM {CLEAN_TBL} t
+        WHERE t.station_id = s.station_id AND t.hour <= s.hour - INTERVAL '3 hours'
+        ORDER BY t.hour DESC LIMIT 1) lag3 ON true
+    LEFT JOIN LATERAL (SELECT num_bikes_available FROM {CLEAN_TBL} t
+        WHERE t.station_id = s.station_id AND t.hour <= s.hour - INTERVAL '6 hours'
+        ORDER BY t.hour DESC LIMIT 1) lag6 ON true
+    LEFT JOIN LATERAL (SELECT num_bikes_available FROM {CLEAN_TBL} t
+        WHERE t.station_id = s.station_id AND t.hour <= s.hour - INTERVAL '12 hours'
+        ORDER BY t.hour DESC LIMIT 1) lag12 ON true
+    LEFT JOIN LATERAL (SELECT num_bikes_available FROM {CLEAN_TBL} t
+        WHERE t.station_id = s.station_id AND t.hour <= s.hour - INTERVAL '24 hours'
+        ORDER BY t.hour DESC LIMIT 1) lagyday ON true
     -- mean availability over the trailing 6 hours (divided by capacity above)
-    LEFT JOIN LATERAL (SELECT avg(num_bikes_available) AS avg_bikes FROM {status_tbl} t
+    LEFT JOIN LATERAL (SELECT avg(num_bikes_available) AS avg_bikes FROM {CLEAN_TBL} t
         WHERE t.station_id = s.station_id
-          AND t.fetched_at >  s.ts - INTERVAL '6 hours'
-          AND t.fetched_at <= s.ts) roll6 ON true
+          AND t.hour >  s.hour - INTERVAL '6 hours'
+          AND t.hour <= s.hour) roll6 ON true
     LEFT JOIN {observed_tbl} w
-        ON w.timestamp = date_trunc('hour', s.ts)
-    LEFT JOIN station_information si              ON si.station_id = s.station_id
+        ON w.timestamp = s.hour
     LEFT JOIN citibike_station_subway_proximity prox
         ON prox.citibike_station_id = s.station_id
     LEFT JOIN station_trip_features stf           ON stf.station_id = s.station_id
     LEFT JOIN station_hourly_flow flow
-        ON flow.station_id = s.station_id AND flow.hour = date_trunc('hour', s.ts)
+        ON flow.station_id = s.station_id AND flow.hour = s.hour
     LEFT JOIN station_demand_profile dp
         ON dp.station_id = s.station_id
-       AND dp.hour_of_day = EXTRACT(HOUR FROM s.ts)
-       AND dp.day_of_week = EXTRACT(DOW FROM s.ts);
+       AND dp.hour_of_day = EXTRACT(HOUR FROM s.hour)
+       AND dp.day_of_week = EXTRACT(DOW FROM s.hour)
+    WHERE s.hour >= %(m_start)s AND s.hour < %(m_end)s;
     """
     with conn.cursor() as cur:
         cur.execute(sql, {"m_start": m_start, "m_end": m_end})
@@ -214,7 +201,7 @@ def build_base_table(conn, status_tbl, observed_tbl, m_start, m_end):
     return n
 
 
-def insert_horizon(conn, status_tbl, forecast_tbl, horizon, m_start, m_end):
+def insert_horizon(conn, forecast_tbl, horizon, m_start, m_end):
     """Join the per-month base table to the target and horizon-matched forecast
     weather, and append rows for one horizon."""
     lead_hours = max(1, round(horizon / 60))
@@ -269,15 +256,15 @@ def insert_horizon(conn, status_tbl, forecast_tbl, horizon, m_start, m_end):
         b.departures_this_hour, b.arrivals_this_hour,
         b.avg_departures_this_hour_dow, b.avg_arrivals_this_hour_dow, b.avg_net_flow_this_hour_dow
     FROM _tf_base b
-    -- TARGET: nearest snapshot at/after (ts + horizon). LEFT JOIN so rows whose
-    -- target falls past the month boundary still build (target NULL -> filtered
-    -- out below, since a row with no label is useless for training).
+    -- TARGET: the clean snapshot at hour (ts + horizon). Direct hourly lookup with
+    -- a small forward tolerance so one missing hour doesn't drop the row. LEFT JOIN
+    -- so targets past the month boundary just produce NULL (filtered out below).
     LEFT JOIN LATERAL (
-        SELECT num_bikes_available FROM {status_tbl} t
+        SELECT num_bikes_available FROM {CLEAN_TBL} t
         WHERE t.station_id = b.station_id
-          AND t.fetched_at >= b.ts + INTERVAL '{horizon} minutes'
-          AND t.fetched_at <  b.ts + INTERVAL '{horizon} minutes' + INTERVAL '30 minutes'
-        ORDER BY t.fetched_at ASC LIMIT 1
+          AND t.hour >= b.ts + INTERVAL '{horizon} minutes'
+          AND t.hour <  b.ts + INTERVAL '{horizon} minutes' + INTERVAL '2 hours'
+        ORDER BY t.hour ASC LIMIT 1
     ) tgt ON true
     -- FORECAST WEATHER: the forecast for valid_time = hour(ts+horizon), issued
     -- at/before ts, with lead time closest to this horizon.
@@ -303,14 +290,17 @@ def build_month(conn, month_start):
     if src is None:
         print(f"  {month_start:%Y-%m}  SKIP (gap / excluded year)")
         return
-    status_tbl, observed_tbl, forecast_tbl = src
+    observed_tbl, forecast_tbl = src
     m_end = month_start + relativedelta(months=1)
 
-    n_base = build_base_table(conn, status_tbl, observed_tbl, month_start, m_end)
-    print(f"  {month_start:%Y-%m}  base rows: {n_base:,}  (src={status_tbl})")
+    n_base = build_base_table(conn, observed_tbl, month_start, m_end)
+    print(f"  {month_start:%Y-%m}  base rows: {n_base:,}  (src={CLEAN_TBL})")
 
     for h in HORIZONS_MINUTES:
-        n = insert_horizon(conn, status_tbl, forecast_tbl, h, month_start, m_end)
+        if h < MIN_HOURLY_HORIZON_MIN:
+            print(f"      horizon {h:>4}min -> SKIP (sub-hourly; clean table is hourly)")
+            continue
+        n = insert_horizon(conn, forecast_tbl, h, month_start, m_end)
         print(f"      horizon {h:>4}min -> {n:,} rows inserted")
 
 
