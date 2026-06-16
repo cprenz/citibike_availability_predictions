@@ -145,6 +145,14 @@ def clean_month(df: pd.DataFrame, capacity: pd.Series) -> pd.DataFrame:
     out = (out.sort_values("fetched_at")
               .drop_duplicates(subset=["station_id", "hour"], keep="last"))
 
+    # --- coerce integer columns to pandas nullable Int64 so COPY gets "31"/"\N",
+    #     never "31.0". A NaN (orphan station with no capacity match, or pre-2018
+    #     NULL ebikes) otherwise promotes the whole column to float64, and to_csv
+    #     writes "31.0" which Postgres rejects for an INTEGER column. ---
+    int_cols = ["num_bikes_available", "num_ebikes_available", "num_docks_available",
+                "num_bikes_disabled", "num_docks_disabled", "capacity"]
+    out[int_cols] = out[int_cols].astype("Int64")
+
     return out[CLEAN_COLUMNS]
 
 
