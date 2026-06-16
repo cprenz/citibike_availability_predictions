@@ -55,6 +55,24 @@ CREATE TABLE IF NOT EXISTS training_features (
     rebalancing_signal                      DOUBLE PRECISION,
     time_since_last_rebalancing             DOUBLE PRECISION,
 
+    -- ---- Count-change features (absolute deltas vs lag; complements the
+    --      capacity-normalized fill_ratio_change_1hr above). GBFS
+    --      num_bikes_available is the TOTAL and INCLUDES ebikes, so classic
+    --      (= total - ebikes) is tracked separately to avoid the total/ebike
+    --      overlap. NULL wherever the matching lag row is missing. ----
+    change_bikes_1hr                        INTEGER,
+    change_bikes_3hr                        INTEGER,
+    change_bikes_6hr                        INTEGER,
+    change_bikes_12hr                       INTEGER,
+    change_ebikes_1hr                       INTEGER,
+    change_ebikes_3hr                       INTEGER,
+    change_ebikes_6hr                       INTEGER,
+    change_ebikes_12hr                      INTEGER,
+    change_classic_1hr                      INTEGER,
+    change_classic_3hr                      INTEGER,
+    change_classic_6hr                      INTEGER,
+    change_classic_12hr                     INTEGER,
+
     -- ---- Observed weather (as-of timestamp) ----
     temperature_2m                          DOUBLE PRECISION,
     apparent_temperature                    DOUBLE PRECISION,

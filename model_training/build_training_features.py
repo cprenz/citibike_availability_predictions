@@ -137,6 +137,27 @@ def build_base_table(conn, observed_tbl, m_start, m_end):
         lag12.num_bikes_available AS bikes_12hr_ago,
         lagyday.num_bikes_available AS bikes_same_hour_yesterday,
 
+        -- count-change features: absolute deltas of the current snapshot vs each
+        -- lag. Total (num_bikes_available) INCLUDES ebikes per GBFS, so classic
+        -- (= total - ebikes) is tracked separately to avoid the total/ebike overlap.
+        -- NULL wherever the lag row is missing (lateral returned no row).
+        (s.num_bikes_available  - lag1.num_bikes_available)   AS change_bikes_1hr,
+        (s.num_bikes_available  - lag3.num_bikes_available)   AS change_bikes_3hr,
+        (s.num_bikes_available  - lag6.num_bikes_available)   AS change_bikes_6hr,
+        (s.num_bikes_available  - lag12.num_bikes_available)  AS change_bikes_12hr,
+        (s.num_ebikes_available - lag1.num_ebikes_available)  AS change_ebikes_1hr,
+        (s.num_ebikes_available - lag3.num_ebikes_available)  AS change_ebikes_3hr,
+        (s.num_ebikes_available - lag6.num_ebikes_available)  AS change_ebikes_6hr,
+        (s.num_ebikes_available - lag12.num_ebikes_available) AS change_ebikes_12hr,
+        ((s.num_bikes_available - s.num_ebikes_available)
+            - (lag1.num_bikes_available  - lag1.num_ebikes_available))  AS change_classic_1hr,
+        ((s.num_bikes_available - s.num_ebikes_available)
+            - (lag3.num_bikes_available  - lag3.num_ebikes_available))  AS change_classic_3hr,
+        ((s.num_bikes_available - s.num_ebikes_available)
+            - (lag6.num_bikes_available  - lag6.num_ebikes_available))  AS change_classic_6hr,
+        ((s.num_bikes_available - s.num_ebikes_available)
+            - (lag12.num_bikes_available - lag12.num_ebikes_available)) AS change_classic_12hr,
+
         -- rate of change over sub-hourly windows: NOT computable from hourly clean
         -- data. NULL here; compute in the clean stage from raw if you want them.
         NULL::double precision AS rate_of_change_10min,
@@ -160,16 +181,16 @@ def build_base_table(conn, observed_tbl, m_start, m_end):
         dp.avg_arrivals   AS avg_arrivals_this_hour_dow,
         dp.avg_net_flow   AS avg_net_flow_this_hour_dow
     FROM {CLEAN_TBL} s
-    LEFT JOIN LATERAL (SELECT num_bikes_available FROM {CLEAN_TBL} t
+    LEFT JOIN LATERAL (SELECT num_bikes_available, num_ebikes_available FROM {CLEAN_TBL} t
         WHERE t.station_id = s.station_id AND t.hour <= s.hour - INTERVAL '1 hour'
         ORDER BY t.hour DESC LIMIT 1) lag1 ON true
-    LEFT JOIN LATERAL (SELECT num_bikes_available FROM {CLEAN_TBL} t
+    LEFT JOIN LATERAL (SELECT num_bikes_available, num_ebikes_available FROM {CLEAN_TBL} t
         WHERE t.station_id = s.station_id AND t.hour <= s.hour - INTERVAL '3 hours'
         ORDER BY t.hour DESC LIMIT 1) lag3 ON true
-    LEFT JOIN LATERAL (SELECT num_bikes_available FROM {CLEAN_TBL} t
+    LEFT JOIN LATERAL (SELECT num_bikes_available, num_ebikes_available FROM {CLEAN_TBL} t
         WHERE t.station_id = s.station_id AND t.hour <= s.hour - INTERVAL '6 hours'
         ORDER BY t.hour DESC LIMIT 1) lag6 ON true
-    LEFT JOIN LATERAL (SELECT num_bikes_available FROM {CLEAN_TBL} t
+    LEFT JOIN LATERAL (SELECT num_bikes_available, num_ebikes_available FROM {CLEAN_TBL} t
         WHERE t.station_id = s.station_id AND t.hour <= s.hour - INTERVAL '12 hours'
         ORDER BY t.hour DESC LIMIT 1) lag12 ON true
     LEFT JOIN LATERAL (SELECT num_bikes_available FROM {CLEAN_TBL} t
@@ -214,6 +235,9 @@ def insert_horizon(conn, forecast_tbl, horizon, m_start, m_end):
         fill_ratio, fill_ratio_change_1hr, rolling_mean_fill_ratio_6hr,
         bikes_1hr_ago, bikes_3hr_ago, bikes_6hr_ago, bikes_12hr_ago,
         bikes_same_hour_yesterday,
+        change_bikes_1hr, change_bikes_3hr, change_bikes_6hr, change_bikes_12hr,
+        change_ebikes_1hr, change_ebikes_3hr, change_ebikes_6hr, change_ebikes_12hr,
+        change_classic_1hr, change_classic_3hr, change_classic_6hr, change_classic_12hr,
         rate_of_change_10min, rate_of_change_20min, rate_of_change_30min,
         temperature_2m, apparent_temperature, precipitation, rain,
         snowfall, wind_speed_10m, cloud_cover, relative_humidity_2m,
@@ -244,6 +268,9 @@ def insert_horizon(conn, forecast_tbl, horizon, m_start, m_end):
         b.fill_ratio, b.fill_ratio_change_1hr, b.rolling_mean_fill_ratio_6hr,
         b.bikes_1hr_ago, b.bikes_3hr_ago, b.bikes_6hr_ago, b.bikes_12hr_ago,
         b.bikes_same_hour_yesterday,
+        b.change_bikes_1hr, b.change_bikes_3hr, b.change_bikes_6hr, b.change_bikes_12hr,
+        b.change_ebikes_1hr, b.change_ebikes_3hr, b.change_ebikes_6hr, b.change_ebikes_12hr,
+        b.change_classic_1hr, b.change_classic_3hr, b.change_classic_6hr, b.change_classic_12hr,
         b.rate_of_change_10min, b.rate_of_change_20min, b.rate_of_change_30min,
         b.temperature_2m, b.apparent_temperature, b.precipitation, b.rain,
         b.snowfall, b.wind_speed_10m, b.cloud_cover, b.relative_humidity_2m,
