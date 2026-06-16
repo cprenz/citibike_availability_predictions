@@ -112,19 +112,32 @@ def clean_month(df: pd.DataFrame, capacity: pd.Series) -> pd.DataFrame:
     # --- drop exact duplicate snapshots ---
     out = out.drop_duplicates(subset=["station_id", "fetched_at"])
 
-    # --- impossible values: negatives and bikes beyond capacity ---
+    # --- impossible values: drop negatives only ---
+    # (0.01 EDA on May 2026 found 0 negatives, but pre-2021 Kaggle data can have
+    #  parse glitches, so the guard stays.)
     count_cols = ["num_bikes_available", "num_ebikes_available",
                   "num_docks_available", "num_bikes_disabled", "num_docks_disabled"]
     out = out[(out[count_cols].fillna(0) >= 0).all(axis=1)]
-    over_cap = out["num_bikes_available"] > out["capacity"]
-    out = out[~over_cap.fillna(False)]
+
+    # NOTE: bikes > capacity is NOT dropped (decision 2026-06-15). The 0.01 EDA
+    # showed all 8,650 such rows (May 2026) are at INSTALLED stations with real
+    # positive capacity — genuine rebalancing overfill, not junk. Keep them as-is;
+    # fill_ratio is allowed to exceed 1.0 downstream (XGBoost is fine; linear sees
+    # a rare >1). Dropping them would discard valid operational data.
+
+    # NOTE: non-operational stations (is_installed = 0, ~4.2% of May 2026 rows) are
+    # also KEPT (decision 2026-06-15). capacity <= 0 is a perfect subset of these,
+    # and the feature builder's NULLIF(capacity, 0) already yields NULL fill_ratio /
+    # normalized features for them; raw zero counts still flow into lags/targets.
 
     # --- coerce is_* to clean booleans (Kaggle loader stored some as 1.0/0.0/NaN) ---
     for c in ["is_installed", "is_renting", "is_returning"]:
         out[c] = out[c].map({1: True, 1.0: True, "1": True, "t": True, True: True,
                              0: False, 0.0: False, "0": False, "f": False, False: False})
 
-    # TODO (from EDA): stuck-sensor flagging, null policy per column, tz checks.
+    # TODO (from EDA): stuck-sensor flagging — deferred until a FULL month is
+    # available; the 0.01 EDA window was only ~2 days (live ingest started
+    # 2026-05-05), too short to distinguish a stuck sensor from a low-traffic dock.
 
     # --- point-sample one snapshot per (station_id, hour): keep the LAST in the
     #     hour (closest to the hour boundary), matching the SQL DISTINCT ON. ---
