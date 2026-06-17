@@ -41,6 +41,11 @@ Usage (run from project root so `citibike` imports):
     python model_training/build_training_features_pandas.py --start 2026-05 --end 2026-06
     python model_training/build_training_features_pandas.py --start 2016-01 --end 2021-12
     python model_training/build_training_features_pandas.py --create-only   # just DDL
+
+    # VALIDATION: write to a scratch table so this builder's rows sit beside the SQL
+    # builder's `training_features` rows (no shared-PK collision) for a column diff:
+    python model_training/build_training_features_pandas.py \
+        --start 2026-05 --end 2026-06 --table training_features_pandas
 """
 
 import argparse
@@ -132,11 +137,30 @@ def get_conn():
     return psycopg2.connect(**DB_CONFIG)
 
 
-def create_table(conn):
-    """Run the CREATE TABLE / hypertable DDL (idempotent)."""
-    conn.cursor().execute(DDL_PATH.read_text())
+DEFAULT_TABLE = "training_features"
+
+
+def create_table(conn, table: str = DEFAULT_TABLE):
+    """Ensure the target table exists (idempotent).
+
+    The canonical `training_features` is always created from the DDL file. A scratch
+    target (e.g. `training_features_pandas`, used to validate this builder against
+    the SQL builder's already-inserted rows WITHOUT colliding on the shared PK) is
+    created as `LIKE training_features INCLUDING ALL` — same columns, PK, indexes —
+    then turned into a hypertable. So the reference table always exists too.
+    """
+    cur = conn.cursor()
+    cur.execute(DDL_PATH.read_text())  # always ensure canonical training_features
+    if table != DEFAULT_TABLE:
+        cur.execute(
+            f"CREATE TABLE IF NOT EXISTS {table} "
+            f"(LIKE {DEFAULT_TABLE} INCLUDING ALL);"
+        )
+        cur.execute(
+            f"SELECT create_hypertable('{table}', 'timestamp', if_not_exists => TRUE);"
+        )
     conn.commit()
-    print(f"Ensured training_features exists (from {DDL_PATH.name}).")
+    print(f"Ensured target table {table} exists.")
 
 
 def weather_sources_for_month(month_start: date):
@@ -402,8 +426,8 @@ def assemble(conn, month_start: date, observed_tbl, forecast_tbl,
     return df
 
 
-def copy_into_features(conn, df: pd.DataFrame) -> int:
-    """COPY the assembled rows into training_features via a TEMP staging table +
+def copy_into_features(conn, df: pd.DataFrame, table: str = DEFAULT_TABLE) -> int:
+    """COPY the assembled rows into the target table via a TEMP staging table +
     INSERT ... ON CONFLICT DO NOTHING (idempotent), same pattern as the clean stage."""
     if df.empty:
         return 0
@@ -425,14 +449,14 @@ def copy_into_features(conn, df: pd.DataFrame) -> int:
     cols = ", ".join(f'"{c}"' if c == "timestamp" else c for c in INSERT_COLUMNS)
     with conn.cursor() as cur:
         cur.execute(
-            "CREATE TEMP TABLE _tf_stage "
-            "(LIKE training_features INCLUDING DEFAULTS) ON COMMIT DROP;"
+            f"CREATE TEMP TABLE _tf_stage "
+            f"(LIKE {table} INCLUDING DEFAULTS) ON COMMIT DROP;"
         )
         cur.copy_expert(
             f"COPY _tf_stage ({cols}) FROM STDIN WITH (FORMAT csv, NULL '\\N')", buf
         )
         cur.execute(
-            f"INSERT INTO training_features ({cols}) "
+            f"INSERT INTO {table} ({cols}) "
             f"SELECT {cols} FROM _tf_stage "
             'ON CONFLICT (station_id, "timestamp", horizon_minutes) DO NOTHING;'
         )
@@ -441,7 +465,7 @@ def copy_into_features(conn, df: pd.DataFrame) -> int:
     return n
 
 
-def build_month(conn, month_start: date, prox, trip, demand):
+def build_month(conn, month_start: date, prox, trip, demand, table=DEFAULT_TABLE):
     src = weather_sources_for_month(month_start)
     if src is None:
         print(f"  {month_start:%Y-%m}  SKIP (gap / excluded year)")
@@ -451,7 +475,7 @@ def build_month(conn, month_start: date, prox, trip, demand):
     if df.empty:
         print(f"  {month_start:%Y-%m}  no clean rows in window — nothing built")
         return
-    n = copy_into_features(conn, df)
+    n = copy_into_features(conn, df, table)
     by_h = df.groupby("horizon_minutes").size()
     detail = "  ".join(f"{h}m:{c:,}" for h, c in by_h.items())
     print(f"  {month_start:%Y-%m}  assembled={len(df):,}  inserted={n:,}  ({detail})")
@@ -466,11 +490,15 @@ def main():
     ap.add_argument("--start", type=parse_month, help="first month, YYYY-MM")
     ap.add_argument("--end", type=parse_month, help="last month, YYYY-MM (inclusive)")
     ap.add_argument("--create-only", action="store_true", help="just run the DDL and exit")
+    ap.add_argument("--table", default=DEFAULT_TABLE,
+                    help="target table (default: training_features). Use a scratch "
+                         "name like training_features_pandas to validate against the "
+                         "SQL builder's rows without colliding on the shared PK.")
     args = ap.parse_args()
 
     conn = get_conn()
     try:
-        create_table(conn)
+        create_table(conn, args.table)
         if args.create_only:
             return
         if not (args.start and args.end):
@@ -478,7 +506,7 @@ def main():
 
         prox, trip, demand = load_static_tables(conn)
         for m in months_between(args.start, args.end):
-            build_month(conn, m, prox, trip, demand)
+            build_month(conn, m, prox, trip, demand, args.table)
         print("Done.")
     finally:
         conn.close()
