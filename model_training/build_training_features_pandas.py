@@ -50,7 +50,9 @@ Usage (run from project root so `citibike` imports):
 
 import argparse
 import io
+import multiprocessing
 import sys
+import time
 from datetime import date, datetime
 from pathlib import Path
 
@@ -207,14 +209,16 @@ def load_static_tables(conn):
         "entrance_count_400m, entrance_count_800m, is_within_400m "
         "FROM citibike_station_subway_proximity;", conn)
     trip = pd.read_sql(
-        "SELECT station_id, member_ratio, ebike_ratio, station_role "
-        "FROM station_trip_features;", conn)
+        "SELECT si.station_id, t.member_ratio, t.ebike_ratio, t.station_role "
+        "FROM station_trip_features t "
+        "JOIN station_information si ON si.short_name = t.station_id;", conn)
     demand = pd.read_sql(
-        "SELECT station_id, hour_of_day, day_of_week, "
-        "avg_departures AS avg_departures_this_hour_dow, "
-        "avg_arrivals  AS avg_arrivals_this_hour_dow, "
-        "avg_net_flow  AS avg_net_flow_this_hour_dow "
-        "FROM station_demand_profile;", conn)
+        "SELECT si.station_id, d.hour_of_day, d.day_of_week, "
+        "d.avg_departures AS avg_departures_this_hour_dow, "
+        "d.avg_arrivals   AS avg_arrivals_this_hour_dow, "
+        "d.avg_net_flow   AS avg_net_flow_this_hour_dow "
+        "FROM station_demand_profile d "
+        "JOIN station_information si ON si.short_name = d.station_id;", conn)
     return prox, trip, demand
 
 
@@ -242,9 +246,10 @@ def load_observed_weather(conn, observed_tbl, w_start, w_end) -> pd.DataFrame:
 
 def load_flow(conn, w_start, w_end) -> pd.DataFrame:
     sql = """
-        SELECT station_id, hour, departures, arrivals
-        FROM station_hourly_flow
-        WHERE hour >= %(w_start)s AND hour < %(w_end)s;
+        SELECT si.station_id, f.hour, f.departures, f.arrivals
+        FROM station_hourly_flow f
+        JOIN station_information si ON si.short_name = f.station_id
+        WHERE f.hour >= %(w_start)s AND f.hour < %(w_end)s;
     """
     return pd.read_sql(sql, conn, params={"w_start": w_start, "w_end": w_end})
 
@@ -315,8 +320,11 @@ def build_base_features(grid: pd.DataFrame) -> pd.DataFrame:
     out["bikes_6hr_ago"], out["bikes_12hr_ago"] = b6, b12
     out["bikes_same_hour_yesterday"] = g["num_bikes_available"].shift(24)
 
-    # capacity-normalized features (NULLIF capacity 0 -> NaN via replace)
-    cap_safe = cap.replace(0, pd.NA).astype("float64")
+    # capacity-normalized features. NULLIF(capacity, 0): cast to float first (so a
+    # nullable-Int64 <NA> becomes np.nan cleanly), then mask 0 -> NaN. Dividing by
+    # this yields NaN for zero/absent-capacity stations, matching the SQL builder.
+    cap_safe = cap.astype("float64")
+    cap_safe = cap_safe.mask(cap_safe == 0)
     out["fill_ratio"] = bikes / cap_safe
     out["fill_ratio_change_1hr"] = (bikes - b1) / cap_safe
     roll6 = g["num_bikes_available"].rolling(6, min_periods=1).mean().reset_index(level=0, drop=True)
@@ -362,22 +370,37 @@ def assemble(conn, month_start: date, observed_tbl, forecast_tbl,
     m_start_ts = pd.Timestamp(month_start, tz="UTC")
     m_end_ts = pd.Timestamp(m_end, tz="UTC")
 
+    t0 = time.time()
+    def elapsed(): return f"{time.time()-t0:.1f}s"
+
     clean = load_clean_window(conn, w_start, w_end)
     if clean.empty:
         return pd.DataFrame()
+    print(f"    load_clean {elapsed()} ({len(clean):,} rows)", flush=True)
 
     grid = build_grid(clean, w_start, w_end)
+    print(f"    build_grid {elapsed()}", flush=True)
+
     base = build_base_features(grid)
+    print(f"    base_features {elapsed()}", flush=True)
 
     horizons = [h for h in HORIZONS_MINUTES if h >= MIN_HOURLY_HORIZON_MIN]
     horizons_hours = [h // 60 for h in horizons]
     targets = add_targets(base, grid, horizons_hours)
 
-    # --- keep only target-month rows as emit rows (buffers were for lags/targets) ---
+    # --- pick the rows to EMIT: target-month hours that were REAL observations.
+    #     The grid was reindexed to a complete hourly spine so .shift() lags/targets
+    #     are exact-key, but most gap-fill slots are NOT real station-hours. The SQL
+    #     builder emits one row per actual row in station_status_hourly_clean, so we
+    #     match that by requiring a non-null num_bikes_available (the clean stage
+    #     guarantees 0 nulls, so notna() == "this hour was actually observed").
+    #     Buffers (back 24h, forward 48h) only ever feed lags/targets, never emit. ---
     hour_idx = base.index.get_level_values("hour")
-    in_month = (hour_idx >= m_start_ts) & (hour_idx < m_end_ts)
-    base = base[in_month].reset_index()           # station_id, hour, features...
-    targets = {h: t[in_month].reset_index(drop=True) for h, t in targets.items()}
+    emit = ((hour_idx >= m_start_ts) & (hour_idx < m_end_ts)
+            & base["num_bikes_available"].notna().to_numpy())
+    base = base[emit].reset_index()               # station_id, hour, features...
+    targets = {h: t[emit].reset_index(drop=True) for h, t in targets.items()}
+    print(f"    emit_filter {elapsed()} ({len(base):,} rows)", flush=True)
 
     # --- time features (Postgres EXTRACT(DOW): Sunday=0 .. Saturday=6) ---
     hr = base["hour"]
@@ -392,24 +415,30 @@ def assemble(conn, month_start: date, observed_tbl, forecast_tbl,
     # --- observed weather, static, demand (same for every horizon) ---
     obs = load_observed_weather(conn, observed_tbl, w_start, w_end)
     base = base.merge(obs, on="hour", how="left")
+    print(f"    merge_weather {elapsed()}", flush=True)
     base = base.merge(prox, on="station_id", how="left")
     base = base.merge(trip, on="station_id", how="left")
 
     flow = load_flow(conn, m_start_ts, m_end_ts)
+    print(f"    load_flow {elapsed()} ({len(flow):,} rows)", flush=True)
     base = base.merge(flow, on=["station_id", "hour"], how="left")
-    base["departures_this_hour"] = base["departures"].fillna(0)
-    base["arrivals_this_hour"] = base["arrivals"].fillna(0)
+    # COALESCE(..., 0): stations with no trips this hour get 0 departures/arrivals.
+    # to_numeric avoids the object-dtype fillna downcast warning on the left-join NaNs.
+    base["departures_this_hour"] = pd.to_numeric(base["departures"], errors="coerce").fillna(0)
+    base["arrivals_this_hour"] = pd.to_numeric(base["arrivals"], errors="coerce").fillna(0)
     base = base.merge(
         demand, left_on=["station_id", "hour_of_day", "day_of_week"],
         right_on=["station_id", "hour_of_day", "day_of_week"], how="left")
+    print(f"    merge_demand {elapsed()}", flush=True)
 
     # --- explode to long form: one block per horizon with target + forecast wx ---
     fc_raw = load_forecast(conn, forecast_tbl, w_start, w_end)
+    print(f"    load_forecast {elapsed()}", flush=True)
     blocks = []
     for h_min, h_hr in zip(horizons, horizons_hours):
         blk = base.copy()
         blk["horizon_minutes"] = h_min
-        tgt = targets[h_min]
+        tgt = targets[h_hr]
         blk["bikes_available_at_horizon"] = tgt.values
         blk = blk[blk["bikes_available_at_horizon"].notna()].copy()   # drop NULL targets
         blk["bike_available_binary"] = (blk["bikes_available_at_horizon"] > 0).astype("Int64")
@@ -422,18 +451,25 @@ def assemble(conn, month_start: date, observed_tbl, forecast_tbl,
         blocks.append(blk)
 
     df = pd.concat(blocks, ignore_index=True)
+    print(f"    concat {elapsed()} ({len(df):,} rows)", flush=True)
     df = df.rename(columns={"hour": "timestamp"})
     return df
 
 
-def copy_into_features(conn, df: pd.DataFrame, table: str = DEFAULT_TABLE) -> int:
-    """COPY the assembled rows into the target table via a TEMP staging table +
-    INSERT ... ON CONFLICT DO NOTHING (idempotent), same pattern as the clean stage."""
+def copy_into_features(conn, df: pd.DataFrame, table: str = DEFAULT_TABLE,
+                       fast: bool = False) -> int:
+    """COPY assembled rows into the target table.
+
+    fast=False (default): COPY → temp staging → INSERT ON CONFLICT DO NOTHING.
+        Safe for incremental monthly retrain runs where rows may already exist.
+    fast=True: COPY directly, synchronous_commit=off, no conflict check.
+        Use for backfill after a TRUNCATE — ~2-3x faster per month.
+        If the process dies mid-run: TRUNCATE and re-run.
+    """
     if df.empty:
         return 0
 
     out = df.copy()
-    # cast nullable ints/bools so COPY emits "31"/"True"/"\N", never "31.0".
     for c in INT64_COLUMNS:
         if c in out:
             out[c] = out[c].astype("Int64")
@@ -448,37 +484,62 @@ def copy_into_features(conn, df: pd.DataFrame, table: str = DEFAULT_TABLE) -> in
 
     cols = ", ".join(f'"{c}"' if c == "timestamp" else c for c in INSERT_COLUMNS)
     with conn.cursor() as cur:
-        cur.execute(
-            f"CREATE TEMP TABLE _tf_stage "
-            f"(LIKE {table} INCLUDING DEFAULTS) ON COMMIT DROP;"
-        )
-        cur.copy_expert(
-            f"COPY _tf_stage ({cols}) FROM STDIN WITH (FORMAT csv, NULL '\\N')", buf
-        )
-        cur.execute(
-            f"INSERT INTO {table} ({cols}) "
-            f"SELECT {cols} FROM _tf_stage "
-            'ON CONFLICT (station_id, "timestamp", horizon_minutes) DO NOTHING;'
-        )
-        n = cur.rowcount
+        if fast:
+            cur.execute("SET synchronous_commit = off;")
+            cur.copy_expert(
+                f"COPY {table} ({cols}) FROM STDIN WITH (FORMAT csv, NULL '\\N')", buf
+            )
+            n = cur.rowcount
+        else:
+            cur.execute(
+                f"CREATE TEMP TABLE _tf_stage "
+                f"(LIKE {table} INCLUDING DEFAULTS) ON COMMIT DROP;"
+            )
+            cur.copy_expert(
+                f"COPY _tf_stage ({cols}) FROM STDIN WITH (FORMAT csv, NULL '\\N')", buf
+            )
+            cur.execute(
+                f"INSERT INTO {table} ({cols}) "
+                f"SELECT {cols} FROM _tf_stage "
+                'ON CONFLICT (station_id, "timestamp", horizon_minutes) DO NOTHING;'
+            )
+            n = cur.rowcount
     conn.commit()
     return n
 
 
-def build_month(conn, month_start: date, prox, trip, demand, table=DEFAULT_TABLE):
+def build_month(conn, month_start: date, prox, trip, demand,
+                table=DEFAULT_TABLE, fast=False):
     src = weather_sources_for_month(month_start)
     if src is None:
-        print(f"  {month_start:%Y-%m}  SKIP (gap / excluded year)")
+        print(f"  {month_start:%Y-%m}  SKIP (gap / excluded year)", flush=True)
         return
     observed_tbl, forecast_tbl = src
+    t0 = time.time()
+    print(f"  {month_start:%Y-%m}  assembling...", flush=True)
     df = assemble(conn, month_start, observed_tbl, forecast_tbl, prox, trip, demand)
     if df.empty:
-        print(f"  {month_start:%Y-%m}  no clean rows in window — nothing built")
+        print(f"  {month_start:%Y-%m}  no clean rows in window — nothing built", flush=True)
         return
-    n = copy_into_features(conn, df, table)
+    print(f"    copy... ({len(df):,} rows)", flush=True)
+    n = copy_into_features(conn, df, table, fast=fast)
     by_h = df.groupby("horizon_minutes").size()
     detail = "  ".join(f"{h}m:{c:,}" for h, c in by_h.items())
-    print(f"  {month_start:%Y-%m}  assembled={len(df):,}  inserted={n:,}  ({detail})")
+    print(f"  {month_start:%Y-%m}  done {time.time()-t0:.0f}s  assembled={len(df):,}  inserted={n:,}  ({detail})", flush=True)
+
+
+def _worker(args):
+    """Top-level worker for multiprocessing.Pool — must be picklable (no lambdas).
+    Each worker opens its own DB connection and processes its assigned months
+    sequentially. prox/trip/demand DataFrames are passed by value (pickled once
+    per worker at pool startup, ~few MB total)."""
+    months, prox, trip, demand, table, fast = args
+    conn = get_conn()
+    try:
+        for month_start in months:
+            build_month(conn, month_start, prox, trip, demand, table, fast)
+    finally:
+        conn.close()
 
 
 def parse_month(s: str) -> date:
@@ -491,9 +552,14 @@ def main():
     ap.add_argument("--end", type=parse_month, help="last month, YYYY-MM (inclusive)")
     ap.add_argument("--create-only", action="store_true", help="just run the DDL and exit")
     ap.add_argument("--table", default=DEFAULT_TABLE,
-                    help="target table (default: training_features). Use a scratch "
-                         "name like training_features_pandas to validate against the "
-                         "SQL builder's rows without colliding on the shared PK.")
+                    help="target table (default: training_features).")
+    ap.add_argument("--fast", action="store_true",
+                    help="skip staging table + turn off synchronous_commit. "
+                         "Use for backfill after TRUNCATE — not safe for incremental runs.")
+    ap.add_argument("--workers", type=int, default=1,
+                    help="parallel worker processes (default 1). Set to CPU count for "
+                         "backfill. Each worker gets its own DB connection and processes "
+                         "an even slice of the month range.")
     args = ap.parse_args()
 
     conn = get_conn()
@@ -505,11 +571,26 @@ def main():
             ap.error("--start and --end are required unless --create-only")
 
         prox, trip, demand = load_static_tables(conn)
-        for m in months_between(args.start, args.end):
-            build_month(conn, m, prox, trip, demand, args.table)
-        print("Done.")
+        month_list = list(months_between(args.start, args.end))
+
+        if args.workers <= 1:
+            for m in month_list:
+                build_month(conn, m, prox, trip, demand, args.table, args.fast)
+        else:
+            n_workers = min(args.workers, len(month_list))
+            # Split months into n_workers even chunks.
+            chunks = [month_list[i::n_workers] for i in range(n_workers)]
+            tasks = [(chunk, prox, trip, demand, args.table, args.fast)
+                     for chunk in chunks]
+            t0 = time.time()
+            with multiprocessing.Pool(n_workers) as pool:
+                pool.map(_worker, tasks)
+            print(f"Done. {len(month_list)} months in {time.time()-t0:.0f}s "
+                  f"({n_workers} workers).")
+            return
     finally:
         conn.close()
+    print("Done.")
 
 
 if __name__ == "__main__":

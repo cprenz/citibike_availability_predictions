@@ -28,7 +28,9 @@ Usage (run from project root so `citibike` imports):
 
 import argparse
 import io
+import multiprocessing
 import sys
+import time
 from datetime import date, datetime
 from pathlib import Path
 
@@ -156,11 +158,11 @@ def clean_month(df: pd.DataFrame, capacity: pd.Series) -> pd.DataFrame:
     return out[CLEAN_COLUMNS]
 
 
-def copy_into_clean(conn, df: pd.DataFrame) -> int:
+def copy_into_clean(conn, df: pd.DataFrame, fast: bool = False) -> int:
     """Bulk-write a cleaned month into station_status_hourly_clean via COPY.
 
-    COPY is ~10-100x faster than row INSERTs. We COPY into a TEMP staging table
-    then INSERT ... ON CONFLICT DO NOTHING so re-running a month is idempotent.
+    fast=False (default): COPY → temp staging → INSERT ON CONFLICT DO NOTHING.
+    fast=True: COPY directly, synchronous_commit=off. Use after TRUNCATE.
     """
     if df.empty:
         return 0
@@ -170,35 +172,54 @@ def copy_into_clean(conn, df: pd.DataFrame) -> int:
 
     cols = ", ".join(CLEAN_COLUMNS)
     with conn.cursor() as cur:
-        cur.execute(
-            "CREATE TEMP TABLE _clean_stage "
-            "(LIKE station_status_hourly_clean INCLUDING DEFAULTS) ON COMMIT DROP;"
-        )
-        cur.copy_expert(
-            f"COPY _clean_stage ({cols}) FROM STDIN WITH (FORMAT csv, NULL '\\N')", buf
-        )
-        cur.execute(
-            f"INSERT INTO station_status_hourly_clean ({cols}) "
-            f"SELECT {cols} FROM _clean_stage "
-            "ON CONFLICT (station_id, hour) DO NOTHING;"
-        )
-        n = cur.rowcount
+        if fast:
+            cur.execute("SET synchronous_commit = off;")
+            cur.copy_expert(
+                f"COPY station_status_hourly_clean ({cols}) FROM STDIN WITH (FORMAT csv, NULL '\\N')", buf
+            )
+            n = cur.rowcount
+        else:
+            cur.execute(
+                "CREATE TEMP TABLE _clean_stage "
+                "(LIKE station_status_hourly_clean INCLUDING DEFAULTS) ON COMMIT DROP;"
+            )
+            cur.copy_expert(
+                f"COPY _clean_stage ({cols}) FROM STDIN WITH (FORMAT csv, NULL '\\N')", buf
+            )
+            cur.execute(
+                f"INSERT INTO station_status_hourly_clean ({cols}) "
+                f"SELECT {cols} FROM _clean_stage "
+                "ON CONFLICT (station_id, hour) DO NOTHING;"
+            )
+            n = cur.rowcount
     conn.commit()
     return n
 
 
-def build_month(conn, month_start: date, capacity: pd.Series):
+def build_month(conn, month_start: date, capacity: pd.Series, fast: bool = False):
     status_tbl = status_table_for_month(month_start)
     if status_tbl is None:
-        print(f"  {month_start:%Y-%m}  SKIP (gap / excluded year)")
+        print(f"  {month_start:%Y-%m}  SKIP (gap / excluded year)", flush=True)
         return
     m_end = month_start + relativedelta(months=1)
+    t0 = time.time()
 
     raw = load_month(conn, status_tbl, month_start, m_end)
     cleaned = clean_month(raw, capacity)
-    n = copy_into_clean(conn, cleaned)
-    print(f"  {month_start:%Y-%m}  raw={len(raw):,}  ->  clean/hourly={len(cleaned):,}  "
-          f"inserted={n:,}  (src={status_tbl})")
+    n = copy_into_clean(conn, cleaned, fast=fast)
+    print(f"  {month_start:%Y-%m}  {time.time()-t0:.0f}s  raw={len(raw):,}  "
+          f"clean/hourly={len(cleaned):,}  inserted={n:,}  (src={status_tbl})", flush=True)
+
+
+def _worker(args):
+    """Top-level worker for multiprocessing.Pool."""
+    months, capacity, fast = args
+    conn = get_conn()
+    try:
+        for month_start in months:
+            build_month(conn, month_start, capacity, fast)
+    finally:
+        conn.close()
 
 
 def parse_month(s: str) -> date:
@@ -216,6 +237,10 @@ def main():
     ap.add_argument("--start", type=parse_month, help="first month, YYYY-MM")
     ap.add_argument("--end", type=parse_month, help="last month, YYYY-MM (inclusive)")
     ap.add_argument("--create-only", action="store_true", help="just run the DDL and exit")
+    ap.add_argument("--fast", action="store_true",
+                    help="direct COPY + synchronous_commit=off. Use for backfill after TRUNCATE.")
+    ap.add_argument("--workers", type=int, default=1,
+                    help="parallel worker processes (default 1). Set to CPU count for backfill.")
     args = ap.parse_args()
 
     conn = get_conn()
@@ -227,11 +252,23 @@ def main():
             ap.error("--start and --end are required unless --create-only")
 
         capacity = load_capacity(conn)
-        for m in months_between(args.start, args.end):
-            build_month(conn, m, capacity)
-        print("Done.")
+        month_list = list(months_between(args.start, args.end))
+
+        if args.workers <= 1:
+            for m in month_list:
+                build_month(conn, m, capacity, args.fast)
+        else:
+            n_workers = min(args.workers, len(month_list))
+            chunks = [month_list[i::n_workers] for i in range(n_workers)]
+            tasks = [(chunk, capacity, args.fast) for chunk in chunks]
+            t0 = time.time()
+            with multiprocessing.Pool(n_workers) as pool:
+                pool.map(_worker, tasks)
+            print(f"Done. {len(month_list)} months in {time.time()-t0:.0f}s ({n_workers} workers).")
+            return
     finally:
         conn.close()
+    print("Done.")
 
 
 if __name__ == "__main__":
