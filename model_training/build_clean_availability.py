@@ -143,6 +143,7 @@ def clean_month(df: pd.DataFrame, capacity: pd.Series) -> pd.DataFrame:
 
     # --- point-sample one snapshot per (station_id, hour): keep the LAST in the
     #     hour (closest to the hour boundary), matching the SQL DISTINCT ON. ---
+    out["fetched_at"] = pd.to_datetime(out["fetched_at"], utc=True)
     out["hour"] = out["fetched_at"].dt.floor("h")
     out = (out.sort_values("fetched_at")
               .drop_duplicates(subset=["station_id", "hour"], keep="last"))
