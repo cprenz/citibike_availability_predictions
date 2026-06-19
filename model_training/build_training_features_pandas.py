@@ -91,6 +91,7 @@ INSERT_COLUMNS = [
     "bikes_available_at_horizon", "bike_available_binary",
     "hour_of_day", "day_of_week", "month", "season", "is_weekend", "is_holiday",
     "num_bikes_available", "num_ebikes_available", "num_docks_available", "num_bikes_disabled",
+    "num_ebikes_was_null", "num_bikes_disabled_was_null",
     "fill_ratio", "fill_ratio_change_1hr", "rolling_mean_fill_ratio_6hr",
     "bikes_1hr_ago", "bikes_3hr_ago", "bikes_6hr_ago", "bikes_12hr_ago",
     "bikes_same_hour_yesterday",
@@ -126,7 +127,8 @@ INT64_COLUMNS = [
 ]
 
 # Nullable boolean columns -> pandas "boolean" dtype so NA serializes to \N.
-BOOL_COLUMNS = ["is_weekend", "is_holiday", "is_within_400m"]
+BOOL_COLUMNS = ["is_weekend", "is_holiday", "is_within_400m",
+                "num_ebikes_was_null", "num_bikes_disabled_was_null"]
 
 # Observed-weather feature columns (same names in the observed weather tables).
 WEATHER_COLS = [
@@ -173,7 +175,7 @@ def weather_sources_for_month(month_start: date):
         return None
     if month_start.year == 2020:
         return None
-    if month_start.year <= 2021:
+    if month_start.year <= 2020:
         return ("weather_pre2021_era5_observed", "weather_pre2021_gfs_forecast")
     return ("weather_post2021_openmeteo_observed", "weather_post2021_openmeteo_forecast")
 
@@ -201,24 +203,78 @@ def season_of(month: pd.Series) -> pd.Series:
 
 # --- side tables (static across months; loaded once) -----------------------------
 
+def _normalize_legacy_ids(s: pd.Series) -> pd.Series:
+    """Strip float suffix from legacy station IDs: '116.0' -> '116'.
+    Modern short-names like '6197.08' are unaffected (don't end in '.0')."""
+    return s.str.replace(r"\.0$", "", regex=True)
+
+
+def load_legacy_capacity(conn) -> pd.Series:
+    """Proxy capacity for pre-2021 legacy stations.
+
+    station_information only holds modern UUIDs, so the clean stage froze
+    capacity=NULL for all pre-2021 rows. Derive it from what's already in
+    station_status_hourly_clean: MAX(bikes+docks) per station, pre-2022 only.
+    Queried from the clean table (29M rows) rather than the raw archive (334M).
+    """
+    df = pd.read_sql(
+        "SELECT station_id, "
+        "MAX(num_bikes_available + num_docks_available) AS capacity "
+        "FROM station_status_hourly_clean WHERE hour < '2022-01-01' "
+        "GROUP BY station_id;",
+        conn)
+    return df.set_index("station_id")["capacity"]
+
+
 def load_static_tables(conn):
     """Load the small, month-independent side tables once: subway proximity,
-    per-station trip features, and the demand profile."""
+    per-station trip features, and the demand profile.
+
+    trip and demand are loaded in BOTH namespaces and concatenated:
+      modern  — via station_information.short_name join -> UUID station_id
+                (matches post-2021 clean rows)
+      legacy  — raw station_id, normalized '116.0' -> '116'
+                (matches pre-2021 clean rows, which use legacy integer IDs)
+    The two ID spaces are disjoint so no real duplicates arise.
+    Proximity stays UUID-only: no historical lat/lon exists for legacy stations;
+    proximity correctly stays NULL for the pre-2021 era (encode-as-missing).
+    """
     prox = pd.read_sql(
         "SELECT citibike_station_id AS station_id, nearest_entrance_dist_m, "
         "entrance_count_400m, entrance_count_800m, is_within_400m "
         "FROM citibike_station_subway_proximity;", conn)
-    trip = pd.read_sql(
+
+    trip_modern = pd.read_sql(
         "SELECT si.station_id, t.member_ratio, t.ebike_ratio, t.station_role "
         "FROM station_trip_features t "
         "JOIN station_information si ON si.short_name = t.station_id;", conn)
-    demand = pd.read_sql(
+    trip_legacy = pd.read_sql(
+        "SELECT station_id, member_ratio, ebike_ratio, station_role "
+        "FROM station_trip_features;", conn)
+    trip_legacy["station_id"] = _normalize_legacy_ids(trip_legacy["station_id"])
+    trip_legacy = trip_legacy.drop_duplicates("station_id")
+    trip = (pd.concat([trip_modern, trip_legacy], ignore_index=True)
+              .drop_duplicates("station_id"))
+
+    demand_modern = pd.read_sql(
         "SELECT si.station_id, d.hour_of_day, d.day_of_week, "
         "d.avg_departures AS avg_departures_this_hour_dow, "
         "d.avg_arrivals   AS avg_arrivals_this_hour_dow, "
         "d.avg_net_flow   AS avg_net_flow_this_hour_dow "
         "FROM station_demand_profile d "
         "JOIN station_information si ON si.short_name = d.station_id;", conn)
+    demand_legacy = pd.read_sql(
+        "SELECT station_id, hour_of_day, day_of_week, "
+        "avg_departures AS avg_departures_this_hour_dow, "
+        "avg_arrivals   AS avg_arrivals_this_hour_dow, "
+        "avg_net_flow   AS avg_net_flow_this_hour_dow "
+        "FROM station_demand_profile;", conn)
+    demand_legacy["station_id"] = _normalize_legacy_ids(demand_legacy["station_id"])
+    demand_legacy = demand_legacy.drop_duplicates(
+        ["station_id", "hour_of_day", "day_of_week"])
+    demand = (pd.concat([demand_modern, demand_legacy], ignore_index=True)
+                .drop_duplicates(["station_id", "hour_of_day", "day_of_week"]))
+
     return prox, trip, demand
 
 
@@ -231,7 +287,9 @@ def load_clean_window(conn, w_start, w_end) -> pd.DataFrame:
         FROM {CLEAN_TBL}
         WHERE hour >= %(w_start)s AND hour < %(w_end)s;
     """
-    return pd.read_sql(sql, conn, params={"w_start": w_start, "w_end": w_end})
+    df = pd.read_sql(sql, conn, params={"w_start": w_start, "w_end": w_end})
+    df["hour"] = pd.to_datetime(df["hour"], utc=True)
+    return df
 
 
 def load_observed_weather(conn, observed_tbl, w_start, w_end) -> pd.DataFrame:
@@ -241,17 +299,33 @@ def load_observed_weather(conn, observed_tbl, w_start, w_end) -> pd.DataFrame:
         FROM {observed_tbl}
         WHERE "timestamp" >= %(w_start)s AND "timestamp" < %(w_end)s;
     """
-    return pd.read_sql(sql, conn, params={"w_start": w_start, "w_end": w_end})
+    df = pd.read_sql(sql, conn, params={"w_start": w_start, "w_end": w_end})
+    df["hour"] = pd.to_datetime(df["hour"], utc=True)
+    return df
 
 
 def load_flow(conn, w_start, w_end) -> pd.DataFrame:
-    sql = """
+    """Load hourly flow in both namespaces and return a single combined frame.
+
+    Modern: short_name join -> UUID station_id (post-2021 trip CSVs).
+    Legacy: raw station_id normalized '116.0' -> '116' (pre-2021 trip CSVs).
+    """
+    flow_modern = pd.read_sql("""
         SELECT si.station_id, f.hour, f.departures, f.arrivals
         FROM station_hourly_flow f
         JOIN station_information si ON si.short_name = f.station_id
         WHERE f.hour >= %(w_start)s AND f.hour < %(w_end)s;
-    """
-    return pd.read_sql(sql, conn, params={"w_start": w_start, "w_end": w_end})
+    """, conn, params={"w_start": w_start, "w_end": w_end})
+    flow_legacy = pd.read_sql("""
+        SELECT station_id, hour, departures, arrivals
+        FROM station_hourly_flow
+        WHERE hour >= %(w_start)s AND hour < %(w_end)s;
+    """, conn, params={"w_start": w_start, "w_end": w_end})
+    flow_legacy["station_id"] = _normalize_legacy_ids(flow_legacy["station_id"])
+    flow = (pd.concat([flow_modern, flow_legacy], ignore_index=True)
+              .drop_duplicates(["station_id", "hour"]))
+    flow["hour"] = pd.to_datetime(flow["hour"], utc=True)
+    return flow
 
 
 def load_forecast(conn, forecast_tbl, w_start, w_end) -> pd.DataFrame:
@@ -263,7 +337,12 @@ def load_forecast(conn, forecast_tbl, w_start, w_end) -> pd.DataFrame:
         FROM {forecast_tbl}
         WHERE valid_time >= %(w_start)s AND valid_time < %(w_end)s;
     """
-    return pd.read_sql(sql, conn, params={"w_start": w_start, "w_end": w_end})
+    fc = pd.read_sql(sql, conn, params={"w_start": w_start, "w_end": w_end})
+    # pd.read_sql can return TIMESTAMPTZ as object dtype; force datetime64[ns,UTC]
+    # so downstream merges on these keys don't hit an object-vs-datetime mismatch.
+    fc["valid_time"] = pd.to_datetime(fc["valid_time"], utc=True)
+    fc["run_time"] = pd.to_datetime(fc["run_time"], utc=True)
+    return fc
 
 
 def forecast_for_horizon(fc: pd.DataFrame, lead_hours: int) -> pd.DataFrame:
@@ -306,9 +385,14 @@ def build_base_features(grid: pd.DataFrame) -> pd.DataFrame:
 
     out = pd.DataFrame(index=grid.index)
     out["num_bikes_available"] = bikes
-    out["num_ebikes_available"] = ebikes
+    # Flag NULL before filling: NULL means data was not tracked (not a gap).
+    # Impute with 0 (domain-correct — pre-ebike era had near-zero ebikes/disabled).
+    out["num_ebikes_was_null"] = ebikes.isna()
+    out["num_ebikes_available"] = ebikes.fillna(0)
     out["num_docks_available"] = grid["num_docks_available"]
-    out["num_bikes_disabled"] = grid["num_bikes_disabled"]
+    disabled = grid["num_bikes_disabled"]
+    out["num_bikes_disabled_was_null"] = disabled.isna()
+    out["num_bikes_disabled"] = disabled.fillna(0)
     out["capacity"] = cap
 
     # lags (exact hourly keys; NaN at gaps)
@@ -361,7 +445,7 @@ def add_targets(base: pd.DataFrame, grid: pd.DataFrame, horizons_hours):
 
 
 def assemble(conn, month_start: date, observed_tbl, forecast_tbl,
-             prox, trip, demand) -> pd.DataFrame:
+             prox, trip, demand, legacy_capacity=None) -> pd.DataFrame:
     """Build the long-form (one row per station x hour x horizon) feature frame for
     one month, ready to COPY."""
     m_end = month_start + relativedelta(months=1)
@@ -376,6 +460,13 @@ def assemble(conn, month_start: date, observed_tbl, forecast_tbl,
     clean = load_clean_window(conn, w_start, w_end)
     if clean.empty:
         return pd.DataFrame()
+    # Fill NULL capacity for pre-2021 legacy stations. station_information has no
+    # legacy integer IDs so the clean stage froze capacity=NULL for those rows.
+    if legacy_capacity is not None:
+        null_mask = clean["capacity"].isna()
+        if null_mask.any():
+            clean.loc[null_mask, "capacity"] = (
+                clean.loc[null_mask, "station_id"].map(legacy_capacity))
     print(f"    load_clean {elapsed()} ({len(clean):,} rows)", flush=True)
 
     grid = build_grid(clean, w_start, w_end)
@@ -509,7 +600,7 @@ def copy_into_features(conn, df: pd.DataFrame, table: str = DEFAULT_TABLE,
 
 
 def build_month(conn, month_start: date, prox, trip, demand,
-                table=DEFAULT_TABLE, fast=False):
+                table=DEFAULT_TABLE, fast=False, legacy_capacity=None):
     src = weather_sources_for_month(month_start)
     if src is None:
         print(f"  {month_start:%Y-%m}  SKIP (gap / excluded year)", flush=True)
@@ -517,7 +608,8 @@ def build_month(conn, month_start: date, prox, trip, demand,
     observed_tbl, forecast_tbl = src
     t0 = time.time()
     print(f"  {month_start:%Y-%m}  assembling...", flush=True)
-    df = assemble(conn, month_start, observed_tbl, forecast_tbl, prox, trip, demand)
+    df = assemble(conn, month_start, observed_tbl, forecast_tbl, prox, trip, demand,
+                  legacy_capacity)
     if df.empty:
         print(f"  {month_start:%Y-%m}  no clean rows in window — nothing built", flush=True)
         return
@@ -531,13 +623,14 @@ def build_month(conn, month_start: date, prox, trip, demand,
 def _worker(args):
     """Top-level worker for multiprocessing.Pool — must be picklable (no lambdas).
     Each worker opens its own DB connection and processes its assigned months
-    sequentially. prox/trip/demand DataFrames are passed by value (pickled once
-    per worker at pool startup, ~few MB total)."""
-    months, prox, trip, demand, table, fast = args
+    sequentially. prox/trip/demand/legacy_capacity are passed by value (pickled
+    once per worker at pool startup, ~few MB total)."""
+    months, prox, trip, demand, table, fast, legacy_capacity = args
     conn = get_conn()
     try:
         for month_start in months:
-            build_month(conn, month_start, prox, trip, demand, table, fast)
+            build_month(conn, month_start, prox, trip, demand, table, fast,
+                        legacy_capacity)
     finally:
         conn.close()
 
@@ -571,16 +664,18 @@ def main():
             ap.error("--start and --end are required unless --create-only")
 
         prox, trip, demand = load_static_tables(conn)
+        legacy_capacity = load_legacy_capacity(conn)
         month_list = list(months_between(args.start, args.end))
 
         if args.workers <= 1:
             for m in month_list:
-                build_month(conn, m, prox, trip, demand, args.table, args.fast)
+                build_month(conn, m, prox, trip, demand, args.table, args.fast,
+                            legacy_capacity)
         else:
             n_workers = min(args.workers, len(month_list))
             # Split months into n_workers even chunks.
             chunks = [month_list[i::n_workers] for i in range(n_workers)]
-            tasks = [(chunk, prox, trip, demand, args.table, args.fast)
+            tasks = [(chunk, prox, trip, demand, args.table, args.fast, legacy_capacity)
                      for chunk in chunks]
             t0 = time.time()
             with multiprocessing.Pool(n_workers) as pool:
