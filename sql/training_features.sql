@@ -33,6 +33,8 @@ CREATE TABLE IF NOT EXISTS training_features (
     num_ebikes_available                    INTEGER,
     num_docks_available                     INTEGER,
     num_bikes_disabled                      INTEGER,
+    num_ebikes_was_null                     BOOLEAN NOT NULL DEFAULT FALSE,
+    num_bikes_disabled_was_null             BOOLEAN NOT NULL DEFAULT FALSE,
 
     -- ---- Normalized / relative availability (capacity-normalized, stationary,
     --      comparable across stations of different sizes) ----
