@@ -110,12 +110,17 @@ def main():
             print("   (none)")
         print()
 
-        # 4. constant / zero-variance numeric columns
+        # 4. constant / zero-variance numeric columns (single pass over all columns)
         print("4. CONSTANT (zero-variance) NUMERIC COLUMNS")
+        minmax_exprs = ", ".join(
+            f"min({c}) AS mn_{i}, max({c}) AS mx_{i}, count({c}) AS cnt_{i}"
+            for i, c in enumerate(numeric_feats)
+        )
+        cur.execute(f"SELECT {minmax_exprs} FROM {t};")
+        row = cur.fetchone()
         any_const = False
-        for c in numeric_feats:
-            mn, mx, nonnull = scalar(
-                cur, f"SELECT min({c}), max({c}), count({c}) FROM {t};")
+        for i, c in enumerate(numeric_feats):
+            mn, mx, nonnull = row[i*3], row[i*3+1], row[i*3+2]
             if nonnull and mn is not None and mn == mx:
                 any_const = True
                 print(f"   {c:<36} constant = {mn}")
