@@ -105,12 +105,36 @@ CREATE TABLE IF NOT EXISTS training_features (
     ebike_ratio                             DOUBLE PRECISION,
     station_role                            VARCHAR(20),
 
+    -- ---- Time features — cyclical encodings (pure transforms; fixes hour-23/hour-0
+    --      discontinuity; helps linear models substantially, harmless for XGBoost) ----
+    hour_sin                                DOUBLE PRECISION,
+    hour_cos                                DOUBLE PRECISION,
+    dow_sin                                 DOUBLE PRECISION,
+    dow_cos                                 DOUBLE PRECISION,
+    month_sin                               DOUBLE PRECISION,
+    month_cos                               DOUBLE PRECISION,
+
     -- ---- Demand signals (trip aggregates) ----
     departures_this_hour                    INTEGER,
     arrivals_this_hour                      INTEGER,
     avg_departures_this_hour_dow            DOUBLE PRECISION,
     avg_arrivals_this_hour_dow              DOUBLE PRECISION,
     avg_net_flow_this_hour_dow              DOUBLE PRECISION,
+
+    -- Cumulative expected net flow: sum of avg_net_flow_this_hour_dow across the
+    -- next H hours from station_demand_profile. Horizon-specific demand climatology
+    -- approximating bikes_at_horizon ≈ bikes_now + net_flow_over_window.
+    cumulative_expected_net_flow_1hr        DOUBLE PRECISION,
+    cumulative_expected_net_flow_3hr        DOUBLE PRECISION,
+    cumulative_expected_net_flow_6hr        DOUBLE PRECISION,
+    cumulative_expected_net_flow_12hr       DOUBLE PRECISION,
+    cumulative_expected_net_flow_24hr       DOUBLE PRECISION,
+
+    -- Recent net-flow momentum lags: arrivals-departures from station_hourly_flow
+    -- lagged 1/3/6 hours. NULL pre-2019 and for JC stations (no trip CSV data).
+    net_flow_1hr                            DOUBLE PRECISION,
+    net_flow_3hr                            DOUBLE PRECISION,
+    net_flow_6hr                            DOUBLE PRECISION,
 
     -- ---- Neighbor features ----
     avg_availability_5_nearest_stations     DOUBLE PRECISION,

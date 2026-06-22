@@ -50,12 +50,14 @@ Usage (run from project root so `citibike` imports):
 
 import argparse
 import io
+import math
 import multiprocessing
 import sys
 import time
 from datetime import date, datetime
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import psycopg2
 from dateutil.relativedelta import relativedelta
@@ -108,6 +110,11 @@ INSERT_COLUMNS = [
     "is_within_400m", "member_ratio", "ebike_ratio", "station_role",
     "departures_this_hour", "arrivals_this_hour",
     "avg_departures_this_hour_dow", "avg_arrivals_this_hour_dow", "avg_net_flow_this_hour_dow",
+    "hour_sin", "hour_cos", "dow_sin", "dow_cos", "month_sin", "month_cos",
+    "cumulative_expected_net_flow_1hr", "cumulative_expected_net_flow_3hr",
+    "cumulative_expected_net_flow_6hr", "cumulative_expected_net_flow_12hr",
+    "cumulative_expected_net_flow_24hr",
+    "net_flow_1hr", "net_flow_3hr", "net_flow_6hr",
 ]
 
 # Integer-typed feature columns (may contain NaN). Cast to pandas nullable Int64
@@ -137,8 +144,57 @@ WEATHER_COLS = [
 ]
 
 
+_CUMFLOW_HORIZONS_H = [1, 3, 6, 12, 24]
+
+
 def get_conn():
     return psycopg2.connect(**DB_CONFIG)
+
+
+def build_cumflow_lookup(conn) -> pd.DataFrame:
+    """Precompute cumulative expected net flow for all (station_id, hour_of_day, day_of_week).
+
+    Loads station_demand_profile in BOTH namespaces (same pattern as load_static_tables):
+      modern  — JOIN station_information.short_name → UUID station_id
+      legacy  — raw station_id normalized '116.0' → '116'
+    """
+    demand_modern = pd.read_sql(
+        "SELECT si.station_id, d.hour_of_day, d.day_of_week, "
+        "COALESCE(d.avg_net_flow, 0.0) AS avg_net_flow "
+        "FROM station_demand_profile d "
+        "JOIN station_information si ON si.short_name = d.station_id;",
+        conn)
+    demand_legacy = pd.read_sql(
+        "SELECT station_id, hour_of_day, day_of_week, "
+        "COALESCE(avg_net_flow, 0.0) AS avg_net_flow "
+        "FROM station_demand_profile;",
+        conn)
+    demand_legacy["station_id"] = demand_legacy["station_id"].str.replace(
+        r"\.0$", "", regex=True)
+    demand = (pd.concat([demand_modern, demand_legacy], ignore_index=True)
+                .drop_duplicates(["station_id", "hour_of_day", "day_of_week"]))
+    demand["week_hour"] = (demand["day_of_week"].astype(int) * 24
+                           + demand["hour_of_day"].astype(int))
+    piv = (demand.pivot_table(index="station_id", columns="week_hour",
+                               values="avg_net_flow", aggfunc="first",
+                               fill_value=0.0)
+                 .reindex(columns=range(168), fill_value=0.0))
+    mat  = piv.values
+    mat2 = np.hstack([mat, mat])       # circular wrap-around
+    cs   = np.cumsum(mat2, axis=1)
+    station_ids = piv.index.values
+    n = len(station_ids)
+    blocks = []
+    for h in range(168):
+        rec: dict = {
+            "station_id":  station_ids,
+            "hour_of_day": np.full(n, h % 24, dtype=np.int16),
+            "day_of_week": np.full(n, h // 24, dtype=np.int16),
+        }
+        for H in _CUMFLOW_HORIZONS_H:
+            rec[f"cumulative_expected_net_flow_{H}hr"] = cs[:, h + H] - cs[:, h]
+        blocks.append(pd.DataFrame(rec))
+    return pd.concat(blocks, ignore_index=True)
 
 
 DEFAULT_TABLE = "training_features"
@@ -275,7 +331,8 @@ def load_static_tables(conn):
     demand = (pd.concat([demand_modern, demand_legacy], ignore_index=True)
                 .drop_duplicates(["station_id", "hour_of_day", "day_of_week"]))
 
-    return prox, trip, demand
+    cumflow = build_cumflow_lookup(conn)
+    return prox, trip, demand, cumflow
 
 
 def load_clean_window(conn, w_start, w_end) -> pd.DataFrame:
@@ -445,7 +502,7 @@ def add_targets(base: pd.DataFrame, grid: pd.DataFrame, horizons_hours):
 
 
 def assemble(conn, month_start: date, observed_tbl, forecast_tbl,
-             prox, trip, demand, legacy_capacity=None) -> pd.DataFrame:
+             prox, trip, demand, cumflow, legacy_capacity=None) -> pd.DataFrame:
     """Build the long-form (one row per station x hour x horizon) feature frame for
     one month, ready to COPY."""
     m_end = month_start + relativedelta(months=1)
@@ -503,6 +560,14 @@ def assemble(conn, month_start: date, observed_tbl, forecast_tbl,
     base["is_weekend"] = pg_dow.isin([0, 6])
     base["is_holiday"] = False              # stub (matches SQL builder); TODO: holidays pkg
 
+    # --- cyclical time encodings ---
+    base["hour_sin"]  = np.sin(2 * math.pi * base["hour_of_day"] / 24)
+    base["hour_cos"]  = np.cos(2 * math.pi * base["hour_of_day"] / 24)
+    base["dow_sin"]   = np.sin(2 * math.pi * base["day_of_week"] / 7)
+    base["dow_cos"]   = np.cos(2 * math.pi * base["day_of_week"] / 7)
+    base["month_sin"] = np.sin(2 * math.pi * base["month"] / 12)
+    base["month_cos"] = np.cos(2 * math.pi * base["month"] / 12)
+
     # --- observed weather, static, demand (same for every horizon) ---
     obs = load_observed_weather(conn, observed_tbl, w_start, w_end)
     base = base.merge(obs, on="hour", how="left")
@@ -510,9 +575,13 @@ def assemble(conn, month_start: date, observed_tbl, forecast_tbl,
     base = base.merge(prox, on="station_id", how="left")
     base = base.merge(trip, on="station_id", how="left")
 
-    flow = load_flow(conn, m_start_ts, m_end_ts)
+    # Load flow with back buffer so net_flow lags can reach back up to 6h before
+    # the month start (w_start covers 24h back, which is more than enough).
+    flow = load_flow(conn, w_start, m_end_ts)
     print(f"    load_flow {elapsed()} ({len(flow):,} rows)", flush=True)
-    base = base.merge(flow, on=["station_id", "hour"], how="left")
+    # Current-hour flow: filter to target month before merging departures/arrivals.
+    flow_current = flow[flow["hour"] >= m_start_ts]
+    base = base.merge(flow_current, on=["station_id", "hour"], how="left")
     # COALESCE(..., 0): stations with no trips this hour get 0 departures/arrivals.
     # to_numeric avoids the object-dtype fillna downcast warning on the left-join NaNs.
     base["departures_this_hour"] = pd.to_numeric(base["departures"], errors="coerce").fillna(0)
@@ -521,6 +590,23 @@ def assemble(conn, month_start: date, observed_tbl, forecast_tbl,
         demand, left_on=["station_id", "hour_of_day", "day_of_week"],
         right_on=["station_id", "hour_of_day", "day_of_week"], how="left")
     print(f"    merge_demand {elapsed()}", flush=True)
+
+    # --- cumulative expected net flow (precomputed lookup keyed by time-of-week) ---
+    base = base.merge(
+        cumflow, on=["station_id", "hour_of_day", "day_of_week"], how="left")
+
+    # --- net-flow momentum lags (flow already loaded with back buffer above) ---
+    flow_nf = flow.assign(
+        net_flow=flow["arrivals"] - flow["departures"]
+    )[["station_id", "hour", "net_flow"]]
+    for lag_h in [1, 3, 6]:
+        col = f"net_flow_{lag_h}hr"
+        lag = flow_nf.copy().rename(columns={"net_flow": col, "hour": "hour_lag"})
+        lag["hour_lag"] = lag["hour_lag"] + pd.Timedelta(hours=lag_h)
+        base = base.merge(
+            lag.rename(columns={"hour_lag": "hour"}),
+            on=["station_id", "hour"], how="left")
+    print(f"    merge_tier1 {elapsed()}", flush=True)
 
     # --- explode to long form: one block per horizon with target + forecast wx ---
     fc_raw = load_forecast(conn, forecast_tbl, w_start, w_end)
@@ -599,7 +685,7 @@ def copy_into_features(conn, df: pd.DataFrame, table: str = DEFAULT_TABLE,
     return n
 
 
-def build_month(conn, month_start: date, prox, trip, demand,
+def build_month(conn, month_start: date, prox, trip, demand, cumflow,
                 table=DEFAULT_TABLE, fast=False, legacy_capacity=None):
     src = weather_sources_for_month(month_start)
     if src is None:
@@ -609,7 +695,7 @@ def build_month(conn, month_start: date, prox, trip, demand,
     t0 = time.time()
     print(f"  {month_start:%Y-%m}  assembling...", flush=True)
     df = assemble(conn, month_start, observed_tbl, forecast_tbl, prox, trip, demand,
-                  legacy_capacity)
+                  cumflow, legacy_capacity)
     if df.empty:
         print(f"  {month_start:%Y-%m}  no clean rows in window — nothing built", flush=True)
         return
@@ -623,13 +709,13 @@ def build_month(conn, month_start: date, prox, trip, demand,
 def _worker(args):
     """Top-level worker for multiprocessing.Pool — must be picklable (no lambdas).
     Each worker opens its own DB connection and processes its assigned months
-    sequentially. prox/trip/demand/legacy_capacity are passed by value (pickled
-    once per worker at pool startup, ~few MB total)."""
-    months, prox, trip, demand, table, fast, legacy_capacity = args
+    sequentially. prox/trip/demand/cumflow/legacy_capacity are passed by value
+    (pickled once per worker at pool startup, ~few MB total)."""
+    months, prox, trip, demand, cumflow, table, fast, legacy_capacity = args
     conn = get_conn()
     try:
         for month_start in months:
-            build_month(conn, month_start, prox, trip, demand, table, fast,
+            build_month(conn, month_start, prox, trip, demand, cumflow, table, fast,
                         legacy_capacity)
     finally:
         conn.close()
@@ -663,19 +749,20 @@ def main():
         if not (args.start and args.end):
             ap.error("--start and --end are required unless --create-only")
 
-        prox, trip, demand = load_static_tables(conn)
+        prox, trip, demand, cumflow = load_static_tables(conn)
         legacy_capacity = load_legacy_capacity(conn)
         month_list = list(months_between(args.start, args.end))
 
         if args.workers <= 1:
             for m in month_list:
-                build_month(conn, m, prox, trip, demand, args.table, args.fast,
-                            legacy_capacity)
+                build_month(conn, m, prox, trip, demand, cumflow, args.table,
+                            args.fast, legacy_capacity)
         else:
             n_workers = min(args.workers, len(month_list))
             # Split months into n_workers even chunks.
             chunks = [month_list[i::n_workers] for i in range(n_workers)]
-            tasks = [(chunk, prox, trip, demand, args.table, args.fast, legacy_capacity)
+            tasks = [(chunk, prox, trip, demand, cumflow, args.table, args.fast,
+                      legacy_capacity)
                      for chunk in chunks]
             t0 = time.time()
             with multiprocessing.Pool(n_workers) as pool:
