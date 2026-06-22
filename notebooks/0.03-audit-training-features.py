@@ -196,6 +196,105 @@ for c in BOOL_COLUMNS:
     print(f"  {c}")
 
 # %% [markdown]
+# ## 7. Tier-1 new columns audit
+# Spot-check of the 14 columns added by `patch_tier1_features.py`.
+# Three checks:
+# - **NULLs**: cyclical columns must be 0% NULL; cumulative net flow and net-flow
+#   momentum lags must match the NULL footprint of their source column
+#   (`avg_net_flow_this_hour_dow` and `departures_this_hour` respectively).
+# - **inf / -inf**: sin/cos can't produce inf; cumulative sums and differences
+#   shouldn't either — flag any that do.
+# - **Constant columns**: all 14 should have real variance.
+
+# %%
+TIER1_CYCLICAL = [
+    "hour_sin", "hour_cos", "dow_sin", "dow_cos", "month_sin", "month_cos",
+]
+TIER1_CUMFLOW = [
+    "cumulative_expected_net_flow_1hr", "cumulative_expected_net_flow_3hr",
+    "cumulative_expected_net_flow_6hr", "cumulative_expected_net_flow_12hr",
+    "cumulative_expected_net_flow_24hr",
+]
+TIER1_FLOW_LAGS = ["net_flow_1hr", "net_flow_3hr", "net_flow_6hr"]
+TIER1_ALL = TIER1_CYCLICAL + TIER1_CUMFLOW + TIER1_FLOW_LAGS
+
+# Reference columns for NULL comparison
+REF_CUMFLOW  = "avg_net_flow_this_hour_dow"
+REF_FLOWLAGS = "departures_this_hour"
+
+cur.execute(f"SELECT count(*) FROM {TABLE} WHERE {REF_CUMFLOW} IS NULL;")
+ref_cumflow_nulls = cur.fetchone()[0]
+cur.execute(f"SELECT count(*) FROM {TABLE} WHERE {REF_FLOWLAGS} IS NULL;")
+ref_flowlag_nulls = cur.fetchone()[0]
+
+print(f"Reference NULL counts (for comparison):")
+print(f"  {REF_CUMFLOW:<45} {ref_cumflow_nulls:>14,}  ({100.0*ref_cumflow_nulls/n_rows:.2f}%)")
+print(f"  {REF_FLOWLAGS:<45} {ref_flowlag_nulls:>14,}  ({100.0*ref_flowlag_nulls/n_rows:.2f}%)")
+
+# %%
+# --- 7a. NULL counts ---
+t1_null_rows = []
+for c in TIER1_ALL:
+    cur.execute(f"SELECT count(*) FROM {TABLE} WHERE {c} IS NULL;")
+    nn = cur.fetchone()[0]
+    pct = 100.0 * nn / n_rows
+
+    if c in TIER1_CYCLICAL:
+        expected = "0%"
+        status = "✓" if nn == 0 else "*** UNEXPECTED NULLs ***"
+    elif c in TIER1_CUMFLOW:
+        expected = f"~{100.0*ref_cumflow_nulls/n_rows:.1f}% (matches {REF_CUMFLOW})"
+        status = "✓" if abs(nn - ref_cumflow_nulls) / max(n_rows, 1) < 0.001 else "check"
+    else:
+        expected = f"~{100.0*ref_flowlag_nulls/n_rows:.1f}% (matches {REF_FLOWLAGS})"
+        status = "✓" if nn <= ref_flowlag_nulls * 1.05 else "check"
+
+    t1_null_rows.append({
+        "column": c,
+        "null_count": f"{nn:,}",
+        "pct": f"{pct:.2f}%",
+        "expected": expected,
+        "status": status,
+    })
+
+pd.DataFrame(t1_null_rows).set_index("column")
+
+# %%
+# --- 7b. inf / -inf ---
+inf_exprs_t1 = ", ".join(
+    f"SUM(CASE WHEN {c} = 'Infinity'::float8 OR {c} = '-Infinity'::float8 "
+    f"THEN 1 ELSE 0 END) AS {c}"
+    for c in TIER1_ALL
+)
+cur.execute(f"SELECT {inf_exprs_t1} FROM {TABLE};")
+inf_t1 = dict(zip(TIER1_ALL, cur.fetchone()))
+inf_t1_df = (
+    pd.DataFrame([{"column": c, "inf_count": v or 0} for c, v in inf_t1.items()])
+    .query("inf_count > 0")
+    .reset_index(drop=True)
+)
+if inf_t1_df.empty:
+    print("inf / -inf check: (none) — all 14 columns clean")
+else:
+    print("*** inf values found — investigate before training ***")
+    inf_t1_df
+
+# %%
+# --- 7c. Constant columns ---
+const_t1_rows = []
+for c in TIER1_ALL:
+    cur.execute(f"SELECT min({c}), max({c}), count({c}) FROM {TABLE};")
+    mn, mx, nonnull = cur.fetchone()
+    if nonnull and mn is not None and mn == mx:
+        const_t1_rows.append({"column": c, "constant_value": mn})
+
+if not const_t1_rows:
+    print("Constant column check: (none) — all 14 columns have real variance")
+else:
+    print("*** constant columns found — drop before training ***")
+    pd.DataFrame(const_t1_rows)
+
+# %% [markdown]
 # ## Summary
 # - **Targets**: must be 0 NULLs (check section 1)
 # - **XGBoost**: train as-is — handles NaN natively, scale-invariant

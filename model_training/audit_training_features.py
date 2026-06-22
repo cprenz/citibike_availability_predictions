@@ -17,6 +17,7 @@ THROW on NaN/inf; XGBoost tolerates NaN. So the audit reports, per the table:
 
 Run from project root:
     python model_training/audit_training_features.py
+    python model_training/audit_training_features.py --training-years-only
     python model_training/audit_training_features.py --table training_features_pandas
 """
 
@@ -55,9 +56,13 @@ def scalar(cur, sql):
 
 def main():
     ap = argparse.ArgumentParser(description="Audit a training_features table for sklearn readiness.")
-    ap.add_argument("--table", default="training_features_pandas")
+    ap.add_argument("--table", default="training_features")
+    ap.add_argument("--training-years-only", action="store_true",
+                    help="Filter to training years 2019, 2021, 2026 only")
     args = ap.parse_args()
     t = args.table
+    where = "WHERE EXTRACT(YEAR FROM \"timestamp\") IN (2019, 2021, 2026)" if args.training_years_only else ""
+    year_label = " (training years: 2019, 2021, 2026)" if args.training_years_only else ""
 
     feature_cols = [c for c in INSERT_COLUMNS if c not in PK and c not in TARGETS]
     numeric_feats = [c for c in feature_cols if c not in TEXT_COLS and c not in BOOL_COLUMNS]
@@ -67,13 +72,15 @@ def main():
     conn = get_conn()
     try:
         cur = conn.cursor()
-        (n_rows,) = scalar(cur, f"SELECT count(*) FROM {t};")
-        print(f"TABLE {t}: {n_rows:,} rows\n")
+        (n_rows,) = scalar(cur, f"SELECT count(*) FROM {t} {where};")
+        print(f"TABLE {t}{year_label}: {n_rows:,} rows\n")
 
         # 1. target health
         print("1. TARGET HEALTH (must be 0 NULLs)")
         for tg in TARGETS:
-            (nn,) = scalar(cur, f"SELECT count(*) FROM {t} WHERE {tg} IS NULL;")
+            base = f"FROM {t} {where}"
+            and_ = "AND" if where else "WHERE"
+            (nn,) = scalar(cur, f"SELECT count(*) {base} {and_} {tg} IS NULL;")
             flag = "ok" if nn == 0 else "*** NULL TARGETS ***"
             print(f"   {tg:<32} nulls={nn:>10,}   {flag}")
         print()
@@ -82,7 +89,7 @@ def main():
         print("2. NULL/NaN PER FEATURE COLUMN (an imputer must cover these for linear models)")
         null_exprs = ", ".join(
             f"SUM(CASE WHEN {q(c)} IS NULL THEN 1 ELSE 0 END) AS {c}" for c in feature_cols)
-        cur.execute(f"SELECT {null_exprs} FROM {t};")
+        cur.execute(f"SELECT {null_exprs} FROM {t} {where};")
         nulls = dict(zip(feature_cols, cur.fetchone()))
         any_null = False
         for c, n in sorted(nulls.items(), key=lambda kv: -(kv[1] or 0)):
@@ -99,7 +106,7 @@ def main():
         inf_exprs = ", ".join(
             f"SUM(CASE WHEN {c} = 'Infinity'::float8 OR {c} = '-Infinity'::float8 "
             f"THEN 1 ELSE 0 END) AS {c}" for c in float_feats)
-        cur.execute(f"SELECT {inf_exprs} FROM {t};")
+        cur.execute(f"SELECT {inf_exprs} FROM {t} {where};")
         infs = dict(zip(float_feats, cur.fetchone()))
         any_inf = any((v or 0) for v in infs.values())
         if any_inf:
@@ -116,7 +123,7 @@ def main():
             f"min({c}) AS mn_{i}, max({c}) AS mx_{i}, count({c}) AS cnt_{i}"
             for i, c in enumerate(numeric_feats)
         )
-        cur.execute(f"SELECT {minmax_exprs} FROM {t};")
+        cur.execute(f"SELECT {minmax_exprs} FROM {t} {where};")
         row = cur.fetchone()
         any_const = False
         for i, c in enumerate(numeric_feats):
@@ -132,7 +139,8 @@ def main():
         print("5. IMPOSSIBLE VALUES (negative counts)")
         any_neg = False
         for c in NONNEG_INT:
-            (nn,) = scalar(cur, f"SELECT count(*) FROM {t} WHERE {c} < 0;")
+            and_ = "AND" if where else "WHERE"
+            (nn,) = scalar(cur, f"SELECT count(*) FROM {t} {where} {and_} {c} < 0;")
             if nn:
                 any_neg = True
                 print(f"   {c:<36} negatives = {nn:,}  *** review ***")
