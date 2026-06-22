@@ -49,3 +49,4 @@ Thumbs.db
 
 # --- Notebooks ---
 .ipynb_checkpoints/
+notebooks/*.py
