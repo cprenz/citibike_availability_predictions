@@ -4,6 +4,7 @@ bleach==6.2.0
 blis==0.9.0
 certifi==2025.1.31
 charset-normalizer==3.4.1
+cloudpickle==3.1.2
 colorama==0.4.6
 comm==0.2.2
 contourpy==1.3.0
@@ -34,6 +35,7 @@ jupyterlab_widgets==3.0.16
 kaggle==1.7.4.5
 kiwisolver==1.4.7
 korean-lunar-calendar==0.3.1
+lightgbm==4.6.0
 llvmlite==0.43.0
 lxml==6.0.0
 matplotlib==3.9.4
@@ -74,9 +76,12 @@ rpds-py==0.27.1
 scikit-learn==1.6.1
 scipy==1.13.1
 seaborn==0.13.2
+shap==0.49.1
 six==1.17.0
+slicer==0.0.8
 stack-data==0.6.3
 statsmodels==0.14.4
+optuna==4.9.0
 text-unidecode==1.3
 threadpoolctl==3.6.0
 toolz==1.0.0
@@ -90,4 +95,5 @@ urllib3==2.4.0
 wcwidth==0.2.13
 webencodings==0.5.1
 widgetsnbextension==4.0.15
+xgboost==2.1.4
 zipp==3.21.0
