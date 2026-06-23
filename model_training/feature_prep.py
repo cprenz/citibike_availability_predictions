@@ -117,9 +117,12 @@ def load_training_data(horizon_minutes: int, years: list[int] = None) -> pd.Data
     df[_SUBWAY_SENTINEL_COL] = df[_SUBWAY_SENTINEL_COL].fillna(_SUBWAY_SENTINEL_VAL)
 
     # Booleans → int so sklearn doesn't see object dtype.
+    # fillna(False) before the int cast: stations missing from the subway
+    # proximity table leave is_within_400m as NULL — domain-correct fill is
+    # False (not within 400m). Covers any other bool column with sparse NULLs.
     for col in _BOOL_FEATURE_COLS:
         if col in df.columns:
-            df[col] = df[col].astype("boolean").astype("Int64").astype(float)
+            df[col] = df[col].astype("boolean").fillna(False).astype("Int64").astype(float)
 
     return df
 
@@ -138,18 +141,22 @@ def get_X_y(df: pd.DataFrame, target: str):
 def build_preprocessor(model_type: str) -> ColumnTransformer:
     """Build a ColumnTransformer for the given model type.
 
-    model_type: "linear" or "xgboost"
+    model_type: "linear", "lightgbm", or "xgboost"
 
-    Linear path:  median imputation → StandardScaler on numerics;
-                  one-hot on categoricals; pass-through on booleans.
-    XGBoost path: one-hot on categoricals only; no imputation or scaling
-                  (XGBoost handles NaN natively and is scale-invariant).
+    Linear path:   median imputation → StandardScaler on numerics;
+                   one-hot on categoricals; pass-through on booleans.
+    Tree path ("lightgbm"/"xgboost"): one-hot on categoricals only; no imputation
+                   or scaling (gradient-boosted trees handle NaN natively and are
+                   scale-invariant). LightGBM and XGBoost share the identical path —
+                   both consume the one-hot matrix directly.
 
     station_role NULLs become "unknown" via handle_unknown="infrequent_if_exist"
     so the model sees an "unknown" category rather than erroring on unseen values.
     """
-    if model_type not in ("linear", "xgboost"):
-        raise ValueError(f"model_type must be 'linear' or 'xgboost', got {model_type!r}")
+    if model_type not in ("linear", "lightgbm", "xgboost"):
+        raise ValueError(
+            f"model_type must be 'linear', 'lightgbm', or 'xgboost', got {model_type!r}"
+        )
 
     cat_transformer = OneHotEncoder(
         handle_unknown="infrequent_if_exist",
@@ -158,7 +165,11 @@ def build_preprocessor(model_type: str) -> ColumnTransformer:
 
     if model_type == "linear":
         num_transformer = Pipeline([
-            ("imputer", SimpleImputer(strategy="median")),
+            # keep_empty_features=True fills all-NaN columns with 0 instead of
+            # propagating NaN. Needed for change_ebikes_*/change_classic_* which
+            # are 100% NULL in early 2019 folds (pre-ebike era). 0 is the correct
+            # domain fill (no change in ebike count when ebikes didn't exist yet).
+            ("imputer", SimpleImputer(strategy="median", keep_empty_features=True)),
             ("scaler", StandardScaler()),
         ])
     else:
