@@ -1,36 +1,28 @@
-"""Patch training_features with 14 Tier-1 columns (all additive — no existing column changed).
+"""One-time backfill for 14 Tier-1 columns added to training_features.
 
-Three feature groups:
+All 14 are additive — no existing column is changed.
 
-  1. Cyclical time encodings (6 cols)
-     hour_sin/cos (period 24), dow_sin/cos (period 7), month_sin/cos (period 12).
-     Pure math on existing hour_of_day / day_of_week / month columns.
+Three groups:
+  1. Cyclical time encodings (6 cols): hour_sin/cos, dow_sin/cos, month_sin/cos.
+     Pure math on existing time columns.
 
-  2. Cumulative expected net flow (5 cols)
-     cumulative_expected_net_flow_{1,3,6,12,24}hr — sum of avg_net_flow_this_hour_dow
-     across the next H hours from station_demand_profile. Precomputed once as a
-     (station_id, hour_of_day, day_of_week) lookup; merged per month.
+  2. Cumulative expected net flow (5 cols): cumulative_expected_net_flow_{1,3,6,12,24}hr.
+     Precomputed as a (station_id, hour_of_day, day_of_week) lookup; merged per month.
 
-  3. Recent net-flow momentum lags (3 cols)
-     net_flow_{1,3,6}hr = arrivals - departures from station_hourly_flow lagged
-     1/3/6 hours. NULL wherever station_hourly_flow has no data (pre-2019, JC
-     stations). Handle as missing-at-random in train_model.py (same as other lags).
+  3. Net-flow momentum lags (3 cols): net_flow_{1,3,6}hr.
+     NULL wherever station_hourly_flow has no data (pre-2019, JC stations) — handle
+     as missing-at-random in the trainer, same as other lag NULLs.
 
-Each month: reads unique (station_id, timestamp) from training_features (hypertable
-partition prune keeps it fast), computes all 14 values in pandas, writes to a TEMP
-staging table, then issues one UPDATE that hits ALL 6 horizon rows per timestamp
-in a single pass.
+Per month: read unique (station_id, timestamp), compute all 14 values in pandas,
+COPY to a TEMP staging table, then UPDATE training_features in one pass — hitting
+all 6 horizon rows per timestamp at once.
 
 Usage (run from project root):
-    # Add the 14 columns to the live table first (idempotent):
-    python model_training/patch_tier1_features.py --alter-only
+    python model_training/patch_tier1_features.py --alter-only   # add columns first
 
-    # Then patch all training years:
     python model_training/patch_tier1_features.py --start 2019-01 --end 2021-12 --workers 16
     python model_training/patch_tier1_features.py --start 2026-05 --end 2026-06 --workers 2
-
-    # To patch a single month (useful for testing):
-    python model_training/patch_tier1_features.py --start 2026-05 --end 2026-05
+    python model_training/patch_tier1_features.py --start 2026-05 --end 2026-05  # single month
 """
 
 import argparse
@@ -93,7 +85,7 @@ def parse_month(s: str) -> date:
 # ---------------------------------------------------------------------------
 
 def alter_table(conn):
-    """Add the 14 new columns idempotently (safe to re-run)."""
+    """Add the 14 new columns (idempotent — safe to re-run)."""
     cur = conn.cursor()
     for col in NEW_COLUMNS:
         cur.execute(
@@ -109,14 +101,10 @@ def alter_table(conn):
 # ---------------------------------------------------------------------------
 
 def build_cumflow_lookup(conn) -> pd.DataFrame:
-    """Return a DataFrame indexed by (station_id, hour_of_day, day_of_week)
-    with one column per cumulative-net-flow horizon.
+    """Cumulative expected net flow for every (station_id, hour_of_day, day_of_week).
 
-    Loads station_demand_profile in BOTH namespaces (same pattern as the builder):
-      modern  — JOIN station_information.short_name → UUID station_id
-                (matches post-2021 training_features rows)
-      legacy  — raw station_id normalized '116.0' → '116'
-                (matches pre-2021 training_features rows)
+    Loaded in two passes — modern UUID (via short_name join) and legacy integer
+    (normalized '116.0' -> '116') — so it matches both pre-2021 and post-2021 rows.
     """
     demand_modern = pd.read_sql(
         "SELECT si.station_id, d.hour_of_day, d.day_of_week, "
@@ -143,9 +131,9 @@ def build_cumflow_lookup(conn) -> pd.DataFrame:
                                fill_value=0.0)
                  .reindex(columns=range(168), fill_value=0.0))
 
-    mat  = piv.values                    # (n_stations, 168)
-    mat2 = np.hstack([mat, mat])         # (n_stations, 336) — handles wrap-around
-    cs   = np.cumsum(mat2, axis=1)       # prefix sums for O(1) range queries
+    mat  = piv.values
+    mat2 = np.hstack([mat, mat])   # double it to handle week wrap-around
+    cs   = np.cumsum(mat2, axis=1) # prefix sums: any H-hour window = cs[:,h+H] - cs[:,h]
 
     station_ids = piv.index.values
     n = len(station_ids)
@@ -173,8 +161,8 @@ def build_cumflow_lookup(conn) -> pd.DataFrame:
 # ---------------------------------------------------------------------------
 
 def load_month_timestamps(conn, m_start, m_end) -> pd.DataFrame:
-    """Unique (station_id, timestamp) for the month, plus time-feature columns
-    needed for cyclic encoding and the cumflow merge."""
+    """Unique (station_id, timestamp) for the month, with time columns needed for
+    the cyclical encodings and the cumflow merge key."""
     df = pd.read_sql(
         """SELECT DISTINCT station_id, "timestamp", hour_of_day, day_of_week, month
            FROM training_features
@@ -283,9 +271,7 @@ def patch_month(conn, month_start: date, cumflow_lookup: pd.DataFrame):
         on=["station_id", "hour_of_day", "day_of_week"],
         how="left")
 
-    # 3. Net-flow momentum lags from station_hourly_flow.
-    #    For lag L hours: the net flow that was observed at timestamp - L.
-    #    Shift each flow row's hour FORWARD by L so it joins on the later timestamp.
+    # 3. Net-flow momentum lags — shift each flow hour forward by L so it joins on (station_id, timestamp).
     buf_start = m_start - pd.Timedelta(hours=max(FLOW_LAG_HOURS))
     flow = load_flow_dual(conn, buf_start, m_end)
 
@@ -312,9 +298,7 @@ def patch_month(conn, month_start: date, cumflow_lookup: pd.DataFrame):
 # ---------------------------------------------------------------------------
 
 def _worker(args):
-    """Top-level worker — must be picklable (no lambdas).
-    Each worker opens its own DB connection and processes its month slice.
-    cumflow_lookup is pickled once per worker at pool startup (~few MB)."""
+    """Top-level (picklable) worker. Opens its own DB connection per process."""
     months, cumflow_lookup = args
     conn = get_conn()
     try:
