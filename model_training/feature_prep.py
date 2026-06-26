@@ -1,7 +1,7 @@
 """Shared preprocessing for Phase 3 model training notebooks.
 
-Imported by 2.02, 2.03, 2.04, 2.05 so prep logic lives in one place and
-the two modeling tracks (regression / classification) never drift apart.
+I keep all prep logic here so 2.02, 2.04, 2.05 stay in sync and I don't
+accidentally drift the regression and classification tracks apart.
 
 Public API:
     load_training_data(horizon_minutes, years) -> pd.DataFrame
@@ -41,7 +41,7 @@ TRAINING_YEARS = [2019, 2021, 2026]
 PK = ["station_id", "timestamp", "horizon_minutes"]
 TARGETS = [TARGET_REGRESSION, TARGET_CLASSIFICATION]
 
-# 100% NULL in all training years — zero signal, drop before any model.
+# 100% NULL in training years — confirmed by audit_training_features.py --training-years-only.
 DROP_COLS = [
     "rate_of_change_10min",
     "rate_of_change_20min",
@@ -54,27 +54,26 @@ DROP_COLS = [
     "bikes_same_hour_same_weekday_4wk_avg",
 ]
 
-# station_id is an identifier, never a feature. One-hot encoding it would break
-# cold-start generalization (new stations → all-zero) and explode dimensionality.
+# station_id stays an identifier, not a feature — one-hot encoding it breaks cold-start
+# (new stations get all-zero) and blows up to ~4,200 sparse columns.
 _EXCLUDE_FROM_FEATURES = set(PK + TARGETS + DROP_COLS)
 
 FEATURE_COLS = [c for c in INSERT_COLUMNS if c not in _EXCLUDE_FROM_FEATURES]
 
-# Column groups for the preprocessor.
 _TEXT_COLS = ["season", "station_role"]
 _BOOL_FEATURE_COLS = [c for c in BOOL_COLUMNS if c in FEATURE_COLS]
 _NUMERIC_COLS = [
     c for c in FEATURE_COLS if c not in _TEXT_COLS and c not in _BOOL_FEATURE_COLS
 ]
 
-# nearest_entrance_dist_m is structurally NULL for stations with no subway entrance
-# within 800m. Fill with sentinel 800 (the search radius) rather than median — median
-# would teach the model the opposite of the truth for these stations.
+# nearest_entrance_dist_m is NULL for stations with no subway entrance within 800m —
+# that's structural, not a data gap. Filling with sentinel 800 (the cutoff) tells the
+# model "nothing nearby," which is correct. Median imputation would teach the wrong thing.
 _SUBWAY_SENTINEL_COL = "nearest_entrance_dist_m"
 _SUBWAY_SENTINEL_VAL = 800.0
 
-# Numeric cols that get median imputation for linear models (everything except the
-# subway sentinel, which is handled separately before the ColumnTransformer).
+# Everything except the subway sentinel gets median imputation for linear models.
+# The sentinel is pre-filled in load_training_data before the ColumnTransformer sees it.
 _IMPUTE_COLS = [c for c in _NUMERIC_COLS if c != _SUBWAY_SENTINEL_COL]
 
 
@@ -85,9 +84,8 @@ _IMPUTE_COLS = [c for c in _NUMERIC_COLS if c != _SUBWAY_SENTINEL_COL]
 def load_training_data(horizon_minutes: int, years: list[int] = None) -> pd.DataFrame:
     """Pull one horizon's worth of training data from training_features.
 
-    Returns a DataFrame with all INSERT_COLUMNS minus the DROP_COLS.
-    Applies sentinel fill for nearest_entrance_dist_m and casts booleans to int
-    so downstream code doesn't have to remember to do it.
+    Drops the 9 all-NULL columns, fills the subway sentinel, and casts booleans
+    to int so every caller gets a ready-to-split DataFrame.
     """
     if years is None:
         years = TRAINING_YEARS
@@ -108,18 +106,17 @@ def load_training_data(horizon_minutes: int, years: list[int] = None) -> pd.Data
     """
 
     with psycopg2.connect(**DB_CONFIG) as conn:
+        with conn.cursor() as cur:
+            cur.execute("SET max_parallel_workers_per_gather = 0")
         df = pd.read_sql(sql, conn)
 
-    # Coerce timestamp so merges don't crash on object vs datetime64 dtype.
+    # pd.read_sql can return TIMESTAMPTZ as object dtype — force it so downstream merges don't break.
     df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
 
-    # Sentinel fill — structural NULL, not a data gap.
     df[_SUBWAY_SENTINEL_COL] = df[_SUBWAY_SENTINEL_COL].fillna(_SUBWAY_SENTINEL_VAL)
 
-    # Booleans → int so sklearn doesn't see object dtype.
-    # fillna(False) before the int cast: stations missing from the subway
-    # proximity table leave is_within_400m as NULL — domain-correct fill is
-    # False (not within 400m). Covers any other bool column with sparse NULLs.
+    # fillna(False) before casting: stations missing from citibike_station_subway_proximity
+    # leave is_within_400m NULL — False is the correct fill (not within 400m).
     for col in _BOOL_FEATURE_COLS:
         if col in df.columns:
             df[col] = df[col].astype("boolean").fillna(False).astype("Int64").astype(float)
@@ -128,7 +125,7 @@ def load_training_data(horizon_minutes: int, years: list[int] = None) -> pd.Data
 
 
 def get_X_y(df: pd.DataFrame, target: str):
-    """Split a loaded DataFrame into feature matrix X and target series y."""
+    """Split a loaded DataFrame into X (features) and y (target)."""
     X = df[FEATURE_COLS].copy()
     y = df[target].copy()
     return X, y
@@ -141,17 +138,12 @@ def get_X_y(df: pd.DataFrame, target: str):
 def build_preprocessor(model_type: str) -> ColumnTransformer:
     """Build a ColumnTransformer for the given model type.
 
-    model_type: "linear", "lightgbm", or "xgboost"
+    "linear": impute median -> StandardScaler on numerics; OHE on categoricals; passthrough booleans.
+    "lightgbm" / "xgboost": OHE on categoricals only — trees handle NaN and are scale-invariant.
+    LightGBM and XGBoost share the same tree path so both take the same feature matrix.
 
-    Linear path:   median imputation → StandardScaler on numerics;
-                   one-hot on categoricals; pass-through on booleans.
-    Tree path ("lightgbm"/"xgboost"): one-hot on categoricals only; no imputation
-                   or scaling (gradient-boosted trees handle NaN natively and are
-                   scale-invariant). LightGBM and XGBoost share the identical path —
-                   both consume the one-hot matrix directly.
-
-    station_role NULLs become "unknown" via handle_unknown="infrequent_if_exist"
-    so the model sees an "unknown" category rather than erroring on unseen values.
+    station_role NULLs get an "unknown" OHE category via handle_unknown="infrequent_if_exist"
+    rather than erroring on unseen values at prediction time.
     """
     if model_type not in ("linear", "lightgbm", "xgboost"):
         raise ValueError(
@@ -165,16 +157,14 @@ def build_preprocessor(model_type: str) -> ColumnTransformer:
 
     if model_type == "linear":
         num_transformer = Pipeline([
-            # keep_empty_features=True fills all-NaN columns with 0 instead of
-            # propagating NaN. Needed for change_ebikes_*/change_classic_* which
-            # are 100% NULL in early 2019 folds (pre-ebike era). 0 is the correct
-            # domain fill (no change in ebike count when ebikes didn't exist yet).
+            # keep_empty_features=True: change_ebikes_*/change_classic_* are 100% NULL
+            # in 2019 folds (pre-ebike era). Without this, an all-NaN column crashes the
+            # scaler. 0 is the right domain fill — no change when ebikes didn't exist.
             ("imputer", SimpleImputer(strategy="median", keep_empty_features=True)),
             ("scaler", StandardScaler()),
         ])
     else:
-        # XGBoost handles NaN natively — imputation would hide the missingness
-        # signal the model can learn from.
+        # Trees handle NaN natively — imputing would lose the missingness signal.
         num_transformer = "passthrough"
 
     return ColumnTransformer(
@@ -182,7 +172,7 @@ def build_preprocessor(model_type: str) -> ColumnTransformer:
             ("num", num_transformer, _IMPUTE_COLS),
             ("cat", cat_transformer, _TEXT_COLS),
             ("bool", "passthrough", _BOOL_FEATURE_COLS),
-            # subway sentinel col passes through already filled — no imputation needed.
+            # Subway sentinel already filled in load_training_data — just pass through.
             ("subway", "passthrough", [_SUBWAY_SENTINEL_COL]),
         ],
         remainder="drop",
