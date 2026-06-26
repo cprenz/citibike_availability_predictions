@@ -1,15 +1,15 @@
 # Citi Bike Availability Forecasting
 
 End-to-end machine learning project that forecasts Citi Bike availability at
-individual docking stations across New York City, at horizons from 10 minutes
-to multiple days ahead. The model is designed to power a consumer-facing web
+individual docking stations across New York City, at horizons from 1 hour to
+multiple days ahead. The model is designed to power a consumer-facing web
 app that shows commuters predicted bike availability at nearby stations before
 they leave home.
 
 ## Goals
 
-- Forecast bike availability per station at multiple horizons: 10 min, 1 hr,
-  3 hr, 6 hr, 12 hr, 24 hr, and multi-day.
+- Forecast bike availability per station at multiple horizons: 1 hr, 3 hr,
+  6 hr, 12 hr, 24 hr, and multi-day.
 - Station-level model that captures individual dock behavior, not system averages.
 - Integrate **forecast** weather as forward-looking features while keeping it
   strictly separate from **observed** weather to avoid leakage at inference time.
@@ -20,7 +20,7 @@ they leave home.
 
 ## Tech Stack
 
-Python · PostgreSQL · TimescaleDB · XGBoost · scikit-learn · Docker ·
+Python · PostgreSQL · TimescaleDB · LightGBM · scikit-learn · Docker ·
 Open-Meteo API · GBFS API · NYC Open Data · Meta Ads
 
 ## Architecture
@@ -92,17 +92,20 @@ Database runs in Docker (TimescaleDB):
 
 ```bash
 docker run -d --name citibike-db -p 5555:5432 \
-  -e POSTGRES_DB=citibike -e POSTGRES_PASSWORD=yourpassword \
+  -e POSTGRES_DB=citibike \
+  -e POSTGRES_USER=citibike_admin \
+  -e POSTGRES_PASSWORD=yourpassword \
   timescale/timescaledb:latest-pg16
 
-psql -h localhost -p 5555 -U postgres -d citibike -f sql/schema.sql
+psql -h localhost -p 5555 -U citibike_admin -d citibike -f sql/schema.sql
 ```
 
 ## Project Status
 
 - [x] Data ingestion pipeline (GBFS, weather, trips, MTA) — complete and running
-- [ ] Phase 2 — build `training_features` table
-- [ ] Phase 3 — train & evaluate 14 models (7 horizons × regression + classification)
+- [x] Phase 2 — `training_features` table built (161M rows, 2016–2021 + 2026)
+- [x] Phase 3 — 18 models trained across 6 horizons (LightGBM + Linear regressors + Logistic classifiers)
+- [ ] Phase 3 — hypothesis test notebooks (1.01–1.07) in progress
 - [ ] Phase 4 — web app + live deployment
 - [ ] Phase 5 — Instagram/Meta ad campaign + A/B testing
 
