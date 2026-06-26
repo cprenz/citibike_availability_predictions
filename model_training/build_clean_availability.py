@@ -1,24 +1,18 @@
 """Phase 2 (clean stage) — build station_status_hourly_clean.
 
-This is STEP 1+2 of the cleaning pipeline:
-
-    station_status / station_status_pre2021   (raw, read-only)
-            |  ① retrieve one month, ② clean_month() in pandas, sample to hourly
+    station_status / station_status_pre2021  (raw, read-only)
+            |  clean_month() in pandas, point-sample to hourly
             v
-    station_status_hourly_clean                (COPY the cleaned month in)
+    station_status_hourly_clean              (COPY the cleaned month in)
 
-Cleaning runs in PANDAS, one month at a time (a single hourly-sampled month is
-~1.4M rows — fits comfortably in RAM; the raw 334M-row archive does not). The
-cleaned rows are bulk-written with psycopg2 COPY (orders of magnitude faster
-than row INSERTs), so a full backfill is a one-time cost of tens of minutes.
+I clean one month at a time (~1.4M rows after hourly sampling — fits in RAM).
+Rows are bulk-written via psycopg2 COPY; a full backfill takes tens of minutes.
 
-Cleaning is ROW-LOCAL (each row judged on its own), so NO cross-month buffer is
-needed here. The buffer only matters in the *feature* build downstream, where
-lag windows look backward across month boundaries.
+Cleaning is row-local so no cross-month buffer is needed here. The buffer only
+matters in the feature build downstream, where lag windows cross month boundaries.
 
-The actual cleaning RULES are prototyped in notebooks/0.01-eda-data-quality.py
-against real data. The known-safe rules live in clean_month() below; port any
-new rules the EDA turns up into that one function (single source of truth).
+All cleaning rules live in clean_month() — that's the single source of truth.
+New rules discovered in notebooks/0.01-eda-data-quality.py get ported in there.
 
 Usage (run from project root so `citibike` imports):
     python model_training/build_clean_availability.py --start 2026-05 --end 2026-06
@@ -44,8 +38,7 @@ from citibike.config import DB_CONFIG  # noqa: E402
 
 DDL_PATH = Path(__file__).resolve().parents[1] / "sql" / "station_status_hourly_clean.sql"
 
-# Columns written to station_status_hourly_clean (order matters for COPY).
-CLEAN_COLUMNS = [
+CLEAN_COLUMNS = [  # order matters for COPY
     "station_id", "hour",
     "num_bikes_available", "num_ebikes_available",
     "num_docks_available", "num_bikes_disabled", "num_docks_disabled",
@@ -53,8 +46,6 @@ CLEAN_COLUMNS = [
     "capacity",
 ]
 
-# Same gap/exclusion logic as the feature builder: no raw snapshots exist in the
-# 2022-April 2026 gap, and 2020 is excluded (COVID anomaly) per the project spec.
 GAP_START = date(2022, 1, 1)
 GAP_END = date(2026, 5, 1)  # exclusive — May 2026 onward has live status data
 
@@ -64,14 +55,14 @@ def get_conn():
 
 
 def create_table(conn):
-    """Run the CREATE TABLE / hypertable DDL (idempotent)."""
+    """Create station_status_hourly_clean if it doesn't exist (idempotent)."""
     conn.cursor().execute(DDL_PATH.read_text())
     conn.commit()
     print(f"Ensured station_status_hourly_clean exists (from {DDL_PATH.name}).")
 
 
 def status_table_for_month(month_start: date):
-    """Return the raw status table for a month, or None if it's in the gap / 2020."""
+    """Return the source status table for this month, or None to skip (gap / 2020)."""
     if GAP_START <= month_start < GAP_END:
         return None
     if month_start.year == 2020:
@@ -88,7 +79,7 @@ def months_between(start: date, end: date):
 
 
 def load_month(conn, status_tbl: str, m_start: date, m_end: date) -> pd.DataFrame:
-    """Pull one raw month of availability snapshots into a DataFrame."""
+    """Pull one raw month of availability snapshots."""
     sql = f"""
         SELECT fetched_at, station_id,
                num_bikes_available, num_ebikes_available,
@@ -101,57 +92,50 @@ def load_month(conn, status_tbl: str, m_start: date, m_end: date) -> pd.DataFram
 
 
 def clean_month(df: pd.DataFrame, capacity: pd.Series) -> pd.DataFrame:
-    """Apply Section-A cleaning rules to one raw month, then point-sample hourly.
+    """Apply cleaning rules to one raw month and point-sample to hourly.
 
-    Cleaning is row-local — no cross-month buffer needed. Rules here are the
-    known-safe ones; extend from the 0.01 EDA notebook as new issues surface.
+    Rules here are the known-safe ones from the 0.01 EDA. Extend this function
+    (not the callers) as new issues surface.
     """
     out = df.copy()
 
     # Merge capacity (from station_information) so we can range-check against it.
     out = out.merge(capacity.rename("capacity"), on="station_id", how="left")
 
-    # --- drop exact duplicate snapshots ---
     out = out.drop_duplicates(subset=["station_id", "fetched_at"])
 
-    # --- impossible values: drop negatives only ---
-    # (0.01 EDA on May 2026 found 0 negatives, but pre-2021 Kaggle data can have
-    #  parse glitches, so the guard stays.)
+    # Drop negatives only. The 0.01 EDA found 0 in May 2026, but the Kaggle archive
+    # can have parse glitches so the guard stays.
     count_cols = ["num_bikes_available", "num_ebikes_available",
                   "num_docks_available", "num_bikes_disabled", "num_docks_disabled"]
     out = out[(out[count_cols].fillna(0) >= 0).all(axis=1)]
 
-    # NOTE: bikes > capacity is NOT dropped (decision 2026-06-15). The 0.01 EDA
-    # showed all 8,650 such rows (May 2026) are at INSTALLED stations with real
-    # positive capacity — genuine rebalancing overfill, not junk. Keep them as-is;
-    # fill_ratio is allowed to exceed 1.0 downstream (XGBoost is fine; linear sees
-    # a rare >1). Dropping them would discard valid operational data.
+    # bikes > capacity: NOT dropped (decision 2026-06-15). All 8,650 such rows in
+    # May 2026 are at INSTALLED stations — genuine rebalancing overfill, not junk.
+    # fill_ratio can exceed 1.0 downstream; that's fine.
 
-    # NOTE: non-operational stations (is_installed = 0, ~4.2% of May 2026 rows) are
-    # also KEPT (decision 2026-06-15). capacity <= 0 is a perfect subset of these,
-    # and the feature builder's NULLIF(capacity, 0) already yields NULL fill_ratio /
-    # normalized features for them; raw zero counts still flow into lags/targets.
+    # is_installed=0 and capacity<=0: also KEPT (decision 2026-06-15). The feature
+    # builder's NULLIF(capacity,0) handles them; raw counts still feed lags/targets.
 
-    # --- coerce is_* to clean booleans (Kaggle loader stored some as 1.0/0.0/NaN) ---
+    # Coerce is_* to clean booleans — the Kaggle loader stored some as 1.0/0.0/NaN.
     for c in ["is_installed", "is_renting", "is_returning"]:
         out[c] = out[c].map({1: True, 1.0: True, "1": True, "t": True, True: True,
                              0: False, 0.0: False, "0": False, "f": False, False: False})
 
-    # TODO (from EDA): stuck-sensor flagging — deferred until a FULL month is
-    # available; the 0.01 EDA window was only ~2 days (live ingest started
-    # 2026-05-05), too short to distinguish a stuck sensor from a low-traffic dock.
+    # TODO: stuck-sensor flagging — deferred. The 0.01 EDA window was only ~2 days
+    # (live ingest started 2026-05-05), too short to tell a stuck sensor from a
+    # low-traffic dock. Revisit once a full month is available.
 
-    # --- point-sample one snapshot per (station_id, hour): keep the LAST in the
-    #     hour (closest to the hour boundary), matching the SQL DISTINCT ON. ---
+    # Point-sample: one snapshot per (station_id, hour), keeping the last in the hour
+    # (closest to the boundary) — matches the SQL builder's DISTINCT ON.
     out["fetched_at"] = pd.to_datetime(out["fetched_at"], utc=True)
     out["hour"] = out["fetched_at"].dt.floor("h")
     out = (out.sort_values("fetched_at")
               .drop_duplicates(subset=["station_id", "hour"], keep="last"))
 
-    # --- coerce integer columns to pandas nullable Int64 so COPY gets "31"/"\N",
-    #     never "31.0". A NaN (orphan station with no capacity match, or pre-2018
-    #     NULL ebikes) otherwise promotes the whole column to float64, and to_csv
-    #     writes "31.0" which Postgres rejects for an INTEGER column. ---
+    # Cast to nullable Int64 so COPY gets "31"/"\N", never "31.0". A single NaN
+    # (orphan station or pre-2018 NULL ebike) promotes the whole column to float64,
+    # and to_csv writes "31.0" which Postgres rejects for an INTEGER column.
     int_cols = ["num_bikes_available", "num_ebikes_available", "num_docks_available",
                 "num_bikes_disabled", "num_docks_disabled", "capacity"]
     out[int_cols] = out[int_cols].astype("Int64")
@@ -162,8 +146,8 @@ def clean_month(df: pd.DataFrame, capacity: pd.Series) -> pd.DataFrame:
 def copy_into_clean(conn, df: pd.DataFrame, fast: bool = False) -> int:
     """Bulk-write a cleaned month into station_status_hourly_clean via COPY.
 
-    fast=False (default): COPY → temp staging → INSERT ON CONFLICT DO NOTHING.
-    fast=True: COPY directly, synchronous_commit=off. Use after TRUNCATE.
+    fast=False: COPY -> temp staging -> INSERT ON CONFLICT DO NOTHING (safe for reruns).
+    fast=True: COPY directly with synchronous_commit=off. Only safe after a TRUNCATE.
     """
     if df.empty:
         return 0
@@ -213,7 +197,7 @@ def build_month(conn, month_start: date, capacity: pd.Series, fast: bool = False
 
 
 def _worker(args):
-    """Top-level worker for multiprocessing.Pool."""
+    """Multiprocessing.Pool worker — must be top-level to pickle."""
     months, capacity, fast = args
     conn = get_conn()
     try:
@@ -228,7 +212,7 @@ def parse_month(s: str) -> date:
 
 
 def load_capacity(conn) -> pd.Series:
-    """One capacity value per station, indexed by station_id."""
+    """Current capacity per station from station_information, indexed by station_id."""
     cap = pd.read_sql("SELECT station_id, capacity FROM station_information;", conn)
     return cap.set_index("station_id")["capacity"]
 
