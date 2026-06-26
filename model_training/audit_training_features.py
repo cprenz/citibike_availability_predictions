@@ -1,19 +1,14 @@
-"""Training-readiness audit for a training_features table (Phase 2 gate).
+"""Training-readiness audit for training_features.
 
-Answers one question: is this table clean enough to fit sklearn models on?
-The crash/corruption checklist is CLAUDE.md Section A. Linear/Ridge/Logistic
-THROW on NaN/inf; XGBoost tolerates NaN. So the audit reports, per the table:
+Checks whether the table is safe to fit sklearn models on. Six things I care about:
 
-  1. Target health   — NULL targets are useless and must be 0 (the build drops
-     them; this confirms it).
-  2. NaN / NULL per feature column — what a linear-model imputer MUST cover. NaNs
-     here are legitimate (lags at hourly gaps, weather gaps, unmatched static), not
-     corruption — but they still crash a raw LinearRegression.fit().
-  3. inf / -inf in float columns — silently break StandardScaler and explode Ridge.
+  1. NULL targets — the builder drops them; this confirms it worked.
+  2. NULL/NaN per feature column — linear models crash on NaN; I need to know
+     what the imputer has to cover. Most NULLs here are legitimate, not corruption.
+  3. inf/-inf in float columns — these break StandardScaler and explode Ridge silently.
   4. Constant (zero-variance) columns — break per-fold scaling (÷0), add nothing.
-  5. Impossible values — negative counts; flagged for review.
-  6. Non-numeric feature columns (season, station_role) — need encoding before a
-     numeric model (a pipeline concern, not dirtiness).
+  5. Impossible negatives in count columns.
+  6. Non-numeric columns (season, station_role) — need encoding before a numeric model.
 
 Run from project root:
     python model_training/audit_training_features.py
@@ -36,7 +31,6 @@ from model_training.build_training_features_pandas import (  # noqa: E402
 PK = ["station_id", "timestamp", "horizon_minutes"]
 TARGETS = ["bikes_available_at_horizon", "bike_available_binary"]
 TEXT_COLS = ["season", "station_role"]
-# Integer count columns that must never be negative (impossible-value check).
 NONNEG_INT = ["num_bikes_available", "num_ebikes_available", "num_docks_available",
               "num_bikes_disabled", "capacity", "departures_this_hour", "arrivals_this_hour"]
 
@@ -66,8 +60,7 @@ def main():
 
     feature_cols = [c for c in INSERT_COLUMNS if c not in PK and c not in TARGETS]
     numeric_feats = [c for c in feature_cols if c not in TEXT_COLS and c not in BOOL_COLUMNS]
-    # float = numeric feature that isn't a nullable-int or bool column.
-    float_feats = [c for c in numeric_feats if c not in INT64_COLUMNS]
+    float_feats = [c for c in numeric_feats if c not in INT64_COLUMNS]  # inf check only makes sense on floats
 
     conn = get_conn()
     try:
@@ -75,7 +68,7 @@ def main():
         (n_rows,) = scalar(cur, f"SELECT count(*) FROM {t} {where};")
         print(f"TABLE {t}{year_label}: {n_rows:,} rows\n")
 
-        # 1. target health
+        # 1. Target health — should be 0.
         print("1. TARGET HEALTH (must be 0 NULLs)")
         for tg in TARGETS:
             base = f"FROM {t} {where}"
@@ -85,7 +78,7 @@ def main():
             print(f"   {tg:<32} nulls={nn:>10,}   {flag}")
         print()
 
-        # 2. NaN / NULL per feature column (only nonzero, sorted desc)
+        # 2. NaN/NULL per feature column — only nonzero, sorted desc.
         print("2. NULL/NaN PER FEATURE COLUMN (an imputer must cover these for linear models)")
         null_exprs = ", ".join(
             f"SUM(CASE WHEN {q(c)} IS NULL THEN 1 ELSE 0 END) AS {c}" for c in feature_cols)
@@ -101,7 +94,7 @@ def main():
             print("   (none)")
         print()
 
-        # 3. inf / -inf in float columns (NaN already counted as NULL by COPY)
+        # 3. inf/-inf — NaN already counts as NULL via COPY so this catches only infinities.
         print("3. inf / -inf IN FLOAT COLUMNS")
         inf_exprs = ", ".join(
             f"SUM(CASE WHEN {c} = 'Infinity'::float8 OR {c} = '-Infinity'::float8 "
@@ -117,7 +110,7 @@ def main():
             print("   (none)")
         print()
 
-        # 4. constant / zero-variance numeric columns (single pass over all columns)
+        # 4. Constant columns — single pass with MIN/MAX/COUNT per column.
         print("4. CONSTANT (zero-variance) NUMERIC COLUMNS")
         minmax_exprs = ", ".join(
             f"min({c}) AS mn_{i}, max({c}) AS mx_{i}, count({c}) AS cnt_{i}"
