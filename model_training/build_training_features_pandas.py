@@ -1,49 +1,33 @@
-"""Phase 2 (feature stage, Option B) — build training_features in PANDAS.
+"""Phase 2 (feature stage, Option B) — build training_features in pandas.
 
-This is the vectorized pandas rewrite of build_training_features.py. It reads the
-same source (station_status_hourly_clean) and writes the same target table
-(training_features) with the SAME columns, but replaces the slow correlated
-LATERAL subqueries (one index probe per row, ~40 min / two months) with grouped
-`.shift()` / `.rolling()` math on a complete hourly grid (~30-100x faster).
+Replaces the slow SQL LATERAL builder (~40 min / two months) with vectorized
+pandas shift/rolling on a complete hourly grid. Same source table, same output
+columns, ~30-100x faster.
 
-    station_status_hourly_clean   (clean, 1 row/station/hour)
-            |  load month + back/fwd buffer, reindex to a COMPLETE hourly grid,
-            |  vectorize lags/changes/rolling/targets, merge side tables   (pandas)
-            v
-    training_features
+    station_status_hourly_clean  ->  pandas shift/rolling/merge  ->  training_features
 
-WHY A NEW FILE (not an edit of build_training_features.py): the SQL builder ran
-successfully end-to-end on May+June 2026 and is kept as the validation reference
-and fallback. Once this pandas builder is shown to reproduce its output
-column-by-column, it becomes the default for the full backfill.
+I kept the SQL builder (build_training_features.py) as a reference and fallback;
+this file is the one actually used for backfill and monthly retraining.
 
-KEY SEMANTIC NOTES vs the SQL builder (mostly identical; two deliberate edges):
-  - LAGS / TARGETS: the SQL builder used a fuzzy "most recent clean row at/before
-    the lag time" (and "earliest at/after the target time, +2h tolerance"). Here we
-    reindex every station to a COMPLETE hourly grid so every lag/target is an EXACT
-    key via `.shift(k)` — a missing hour becomes NaN rather than silently borrowing
-    an adjacent hour. On the (near-complete) clean table the two agree everywhere
-    except at genuine hourly gaps, where this version is stricter (NaN). This is the
-    documented Option-B end-state.
-  - is_holiday is still FALSE here (matches the SQL builder's current stub). Wiring
-    a real US-federal + NYC calendar is a separate next-build item.
+Two deliberate differences from the SQL builder:
+  - Lags and targets are EXACT-KEY on the hourly grid (NaN at a gap), vs the SQL's
+    fuzzy at/before lookup. The two agree everywhere except genuine hourly gaps.
+  - is_holiday is still FALSE (matches the SQL stub). Wiring a real holiday calendar
+    is a separate build item.
 
-The unpopulated-by-design columns (bikes_same_hour_same_weekday_4wk_avg,
-emptying_frequency, capping_frequency, rebalancing_signal,
-time_since_last_rebalancing, avg_availability_5_nearest_stations) are omitted from
-the INSERT exactly as the SQL builder omits them, so they land as NULL in both.
+The never-built stub columns (bikes_same_hour_same_weekday_4wk_avg, emptying_frequency,
+etc.) are omitted from the INSERT so they land as NULL — same as the SQL builder.
 
 Idempotent: COPY into a TEMP staging table then INSERT ... ON CONFLICT DO NOTHING
-on the (station_id, timestamp, horizon_minutes) PK — same pattern as
-build_clean_availability.py — so re-running a month is safe.
+on the (station_id, timestamp, horizon_minutes) PK. Re-running a month is safe
+without --fast; --fast skips the staging table and is only safe after a TRUNCATE.
 
 Usage (run from project root so `citibike` imports):
     python model_training/build_training_features_pandas.py --start 2026-05 --end 2026-06
     python model_training/build_training_features_pandas.py --start 2016-01 --end 2021-12
     python model_training/build_training_features_pandas.py --create-only   # just DDL
 
-    # VALIDATION: write to a scratch table so this builder's rows sit beside the SQL
-    # builder's `training_features` rows (no shared-PK collision) for a column diff:
+    # Write to a scratch table for side-by-side validation against the SQL builder:
     python model_training/build_training_features_pandas.py \
         --start 2026-05 --end 2026-06 --table training_features_pandas
 """
@@ -62,7 +46,6 @@ import pandas as pd
 import psycopg2
 from dateutil.relativedelta import relativedelta
 
-# Make `citibike` importable when run as a script from the project root.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from citibike.config import DB_CONFIG, HORIZONS_MINUTES  # noqa: E402
 
@@ -70,24 +53,19 @@ DDL_PATH = Path(__file__).resolve().parents[1] / "sql" / "training_features.sql"
 
 CLEAN_TBL = "station_status_hourly_clean"
 
-# Horizons below this can't be built from hourly data (no sub-hourly snapshots).
-MIN_HOURLY_HORIZON_MIN = 60
+MIN_HOURLY_HORIZON_MIN = 60  # can't build sub-hourly horizons from hourly data
 
-# The availability gap: no clean rows exist here, so months starting inside it are
-# skipped (mirrors build_clean_availability.py / build_training_features.py).
+# Months inside this range have no source data — skip them.
 GAP_START = date(2022, 1, 1)
 GAP_END = date(2026, 5, 1)  # exclusive — May 2026 onward has live status data
 
-# Load buffers around the target month (hours). Backward buffer feeds the longest
-# lag (24h = same hour yesterday); forward buffer feeds the longest target horizon
-# (2880min = 48h) so late-month rows still get a target from early next month —
-# exactly what the SQL builder's unbounded LATERAL target lookup did.
+# 24h back feeds the longest lag (same hour yesterday); 48h forward feeds the longest
+# target horizon (2880 min) so end-of-month rows still get a target from next month.
 BACK_BUFFER_HOURS = 24
 FWD_BUFFER_HOURS = max(HORIZONS_MINUTES) // 60  # 2880min -> 48h
 
-# Exact INSERT column order — IDENTICAL to build_training_features.py's INSERT, so
-# the two builders' rows are directly comparable. Columns not listed here are left
-# to their DB default (NULL): the stubbed lag/neighbor features.
+# Column order must match the SQL builder's INSERT exactly so the two builders'
+# rows are directly comparable. Stub columns not listed here land as NULL.
 INSERT_COLUMNS = [
     "station_id", "timestamp", "horizon_minutes",
     "bikes_available_at_horizon", "bike_available_binary",
@@ -117,9 +95,8 @@ INSERT_COLUMNS = [
     "net_flow_1hr", "net_flow_3hr", "net_flow_6hr",
 ]
 
-# Integer-typed feature columns (may contain NaN). Cast to pandas nullable Int64
-# BEFORE COPY so to_csv writes "31"/"\N" and never "31.0" — the same float-promotion
-# trap that bit the clean stage (an INTEGER column rejects "31.0").
+# Cast to nullable Int64 before COPY so to_csv writes "31"/"\N", never "31.0".
+# Postgres rejects "31.0" for an INTEGER column — the same trap that hit the clean stage.
 INT64_COLUMNS = [
     "horizon_minutes", "bikes_available_at_horizon", "bike_available_binary",
     "hour_of_day", "day_of_week", "month",
@@ -133,11 +110,10 @@ INT64_COLUMNS = [
     "departures_this_hour", "arrivals_this_hour",
 ]
 
-# Nullable boolean columns -> pandas "boolean" dtype so NA serializes to \N.
+# "boolean" dtype serializes NA as \N in to_csv, which COPY reads as NULL.
 BOOL_COLUMNS = ["is_weekend", "is_holiday", "is_within_400m",
                 "num_ebikes_was_null", "num_bikes_disabled_was_null"]
 
-# Observed-weather feature columns (same names in the observed weather tables).
 WEATHER_COLS = [
     "temperature_2m", "apparent_temperature", "precipitation", "rain",
     "snowfall", "wind_speed_10m", "cloud_cover", "relative_humidity_2m",
@@ -152,11 +128,11 @@ def get_conn():
 
 
 def build_cumflow_lookup(conn) -> pd.DataFrame:
-    """Precompute cumulative expected net flow for all (station_id, hour_of_day, day_of_week).
+    """Cumulative expected net flow for every (station_id, hour_of_day, day_of_week).
 
-    Loads station_demand_profile in BOTH namespaces (same pattern as load_static_tables):
-      modern  — JOIN station_information.short_name → UUID station_id
-      legacy  — raw station_id normalized '116.0' → '116'
+    Loads station_demand_profile in both namespaces — modern UUID (via short_name join)
+    and legacy integer (normalized '116.0' -> '116') — then deduplicates and builds
+    prefix sums so any H-hour window is an O(1) lookup.
     """
     demand_modern = pd.read_sql(
         "SELECT si.station_id, d.hour_of_day, d.day_of_week, "
@@ -203,11 +179,9 @@ DEFAULT_TABLE = "training_features"
 def create_table(conn, table: str = DEFAULT_TABLE):
     """Ensure the target table exists (idempotent).
 
-    The canonical `training_features` is always created from the DDL file. A scratch
-    target (e.g. `training_features_pandas`, used to validate this builder against
-    the SQL builder's already-inserted rows WITHOUT colliding on the shared PK) is
-    created as `LIKE training_features INCLUDING ALL` — same columns, PK, indexes —
-    then turned into a hypertable. So the reference table always exists too.
+    training_features is always created from the DDL file. A scratch table
+    (e.g. training_features_pandas for side-by-side validation) is created as
+    LIKE training_features INCLUDING ALL so it has the same schema, PK, and indexes.
     """
     cur = conn.cursor()
     cur.execute(DDL_PATH.read_text())  # always ensure canonical training_features
@@ -224,9 +198,7 @@ def create_table(conn, table: str = DEFAULT_TABLE):
 
 
 def weather_sources_for_month(month_start: date):
-    """Return (observed_tbl, forecast_tbl) for a month, or None if it's in the
-    un-backfillable gap / excluded year. Availability always comes from CLEAN_TBL;
-    only the weather tables differ by era."""
+    """Return (observed_tbl, forecast_tbl) for a month, or None if it's in the gap / 2020."""
     if GAP_START <= month_start < GAP_END:
         return None
     if month_start.year == 2020:
@@ -260,18 +232,17 @@ def season_of(month: pd.Series) -> pd.Series:
 # --- side tables (static across months; loaded once) -----------------------------
 
 def _normalize_legacy_ids(s: pd.Series) -> pd.Series:
-    """Strip float suffix from legacy station IDs: '116.0' -> '116'.
-    Modern short-names like '6197.08' are unaffected (don't end in '.0')."""
+    """Strip the float suffix from legacy IDs: '116.0' -> '116'. Modern short-names
+    like '6197.08' are unaffected — they don't end in '.0'."""
     return s.str.replace(r"\.0$", "", regex=True)
 
 
 def load_legacy_capacity(conn) -> pd.Series:
     """Proxy capacity for pre-2021 legacy stations.
 
-    station_information only holds modern UUIDs, so the clean stage froze
-    capacity=NULL for all pre-2021 rows. Derive it from what's already in
-    station_status_hourly_clean: MAX(bikes+docks) per station, pre-2022 only.
-    Queried from the clean table (29M rows) rather than the raw archive (334M).
+    station_information only has modern UUIDs, so the clean stage wrote capacity=NULL
+    for all pre-2021 rows. I derive it from the clean table itself: MAX(bikes+docks)
+    per station, pre-2022. Much faster than going back to the 334M-row raw archive.
     """
     df = pd.read_sql(
         "SELECT station_id, "
@@ -283,17 +254,16 @@ def load_legacy_capacity(conn) -> pd.Series:
 
 
 def load_static_tables(conn):
-    """Load the small, month-independent side tables once: subway proximity,
-    per-station trip features, and the demand profile.
+    """Load the small, month-independent side tables once: subway proximity, trip features,
+    and the demand profile.
 
-    trip and demand are loaded in BOTH namespaces and concatenated:
-      modern  — via station_information.short_name join -> UUID station_id
-                (matches post-2021 clean rows)
-      legacy  — raw station_id, normalized '116.0' -> '116'
-                (matches pre-2021 clean rows, which use legacy integer IDs)
-    The two ID spaces are disjoint so no real duplicates arise.
-    Proximity stays UUID-only: no historical lat/lon exists for legacy stations;
-    proximity correctly stays NULL for the pre-2021 era (encode-as-missing).
+    Trip and demand are loaded in two passes and concatenated:
+      modern — via station_information.short_name -> UUID (matches post-2021 clean rows)
+      legacy — raw station_id normalized '116.0' -> '116' (matches pre-2021 clean rows)
+    The two ID spaces are disjoint so no real duplicates arise after dedup.
+
+    Proximity stays UUID-only — no historical lat/lon exists for legacy stations, so
+    proximity stays NULL for the pre-2021 era (structural, not a data gap).
     """
     prox = pd.read_sql(
         "SELECT citibike_station_id AS station_id, nearest_entrance_dist_m, "
@@ -336,7 +306,7 @@ def load_static_tables(conn):
 
 
 def load_clean_window(conn, w_start, w_end) -> pd.DataFrame:
-    """Pull clean hourly rows for [w_start, w_end) (month + buffers)."""
+    """Pull clean hourly rows for [w_start, w_end) — the month plus back/forward buffers."""
     sql = f"""
         SELECT station_id, hour, capacity,
                num_bikes_available, num_ebikes_available,
@@ -362,11 +332,7 @@ def load_observed_weather(conn, observed_tbl, w_start, w_end) -> pd.DataFrame:
 
 
 def load_flow(conn, w_start, w_end) -> pd.DataFrame:
-    """Load hourly flow in both namespaces and return a single combined frame.
-
-    Modern: short_name join -> UUID station_id (post-2021 trip CSVs).
-    Legacy: raw station_id normalized '116.0' -> '116' (pre-2021 trip CSVs).
-    """
+    """Load hourly flow in both namespaces (modern UUID + legacy integer) and combine."""
     flow_modern = pd.read_sql("""
         SELECT si.station_id, f.hour, f.departures, f.arrivals
         FROM station_hourly_flow f
@@ -386,8 +352,10 @@ def load_flow(conn, w_start, w_end) -> pd.DataFrame:
 
 
 def load_forecast(conn, forecast_tbl, w_start, w_end) -> pd.DataFrame:
-    """Forecast runs whose valid_time falls in the target window. We bound on
-    valid_time (the hour being predicted) so every target's forecast is present."""
+    """Forecast runs whose valid_time falls in the target window.
+
+    Bounding on valid_time (not run_time) ensures every target hour has a forecast available.
+    """
     cols = ", ".join(WEATHER_COLS)
     sql = f"""
         SELECT run_time, valid_time, lead_time_hours, {cols}
@@ -403,14 +371,13 @@ def load_forecast(conn, forecast_tbl, w_start, w_end) -> pd.DataFrame:
 
 
 def forecast_for_horizon(fc: pd.DataFrame, lead_hours: int) -> pd.DataFrame:
-    """Collapse the forecast table to ONE row per valid_time for this horizon.
+    """Collapse the forecast table to one row per valid_time for this horizon.
 
-    Reproduces the SQL builder's LATERAL: for valid_time = hour(ts+horizon), among
-    runs issued at/before ts (run_time <= ts) pick the lead closest to `lead_hours`,
-    tie-broken by most-recent run. Because ts = valid_time - horizon and the grid is
-    hourly, "run_time <= ts" is exactly "lead_time_hours >= lead_hours"; the closest
-    lead is then the SMALLEST such lead (= the most recent qualifying run). So:
-    filter lead >= lead_hours, take min lead per valid_time."""
+    Reproduces the SQL builder's LATERAL: among runs issued at/before the prediction
+    time (run_time <= ts), pick the one whose lead is closest to lead_hours. Because
+    ts = valid_time - horizon, "run_time <= ts" is equivalent to "lead_time_hours >= lead_hours".
+    So: filter lead >= lead_hours, take the minimum lead per valid_time (= most recent run).
+    """
     c = fc[fc["lead_time_hours"] >= lead_hours]
     c = c.sort_values(["valid_time", "lead_time_hours"]).groupby("valid_time", as_index=False).first()
     rename = {col: f"forecast_{col}" for col in WEATHER_COLS}
@@ -418,8 +385,8 @@ def forecast_for_horizon(fc: pd.DataFrame, lead_hours: int) -> pd.DataFrame:
 
 
 def build_grid(clean: pd.DataFrame, w_start, w_end) -> pd.DataFrame:
-    """Reindex every station to a COMPLETE hourly grid over the load window, so
-    gaps become explicit NaN and `.shift()` lags/targets are exact-key lookups."""
+    """Reindex every station to a complete hourly grid so gaps become explicit NaN
+    and .shift() lags/targets are exact-key lookups rather than fuzzy searches."""
     full_index = pd.date_range(w_start, w_end, freq="h", inclusive="left", tz="UTC")
     stations = clean["station_id"].unique()
     mi = pd.MultiIndex.from_product([stations, full_index], names=["station_id", "hour"])
@@ -427,13 +394,18 @@ def build_grid(clean: pd.DataFrame, w_start, w_end) -> pd.DataFrame:
     # capacity is frozen per station; carry it onto filled rows so real month rows
     # divided in fill_ratio always have a denominator even if their own hour existed
     # only as a gap-fill (real rows already carry it; this is belt-and-suspenders).
+    # Carry capacity onto gap-fill rows — real rows already have it; this covers
+    # the rare case where a station's only capacity row is in the buffer.
     grid["capacity"] = grid.groupby(level=0)["capacity"].transform("max")
     return grid.sort_index()
 
 
 def build_base_features(grid: pd.DataFrame) -> pd.DataFrame:
-    """Compute all horizon-INDEPENDENT features on the hourly grid via grouped
-    shifts/rolling. Returns a frame indexed (station_id, hour)."""
+    """Compute all horizon-independent features via grouped shifts/rolling.
+
+    Returns a frame indexed (station_id, hour). Horizon-specific targets and
+    forecast weather are added later in the per-horizon loop.
+    """
     g = grid.groupby(level=0)
     bikes = grid["num_bikes_available"]
     ebikes = grid["num_ebikes_available"]
@@ -442,8 +414,8 @@ def build_base_features(grid: pd.DataFrame) -> pd.DataFrame:
 
     out = pd.DataFrame(index=grid.index)
     out["num_bikes_available"] = bikes
-    # Flag NULL before filling: NULL means data was not tracked (not a gap).
-    # Impute with 0 (domain-correct — pre-ebike era had near-zero ebikes/disabled).
+    # NULL here means the column wasn't tracked in this era, not a data gap.
+    # 0 is the right fill — pre-ebike stations had zero ebikes.
     out["num_ebikes_was_null"] = ebikes.isna()
     out["num_ebikes_available"] = ebikes.fillna(0)
     out["num_docks_available"] = grid["num_docks_available"]
@@ -452,7 +424,7 @@ def build_base_features(grid: pd.DataFrame) -> pd.DataFrame:
     out["num_bikes_disabled"] = disabled.fillna(0)
     out["capacity"] = cap
 
-    # lags (exact hourly keys; NaN at gaps)
+    # Lags are exact-key on the complete grid — NaN where a station had an hourly gap.
     b1, b3, b6, b12 = g["num_bikes_available"].shift(1), g["num_bikes_available"].shift(3), \
         g["num_bikes_available"].shift(6), g["num_bikes_available"].shift(12)
     e1, e3, e6, e12 = g["num_ebikes_available"].shift(1), g["num_ebikes_available"].shift(3), \
@@ -461,9 +433,8 @@ def build_base_features(grid: pd.DataFrame) -> pd.DataFrame:
     out["bikes_6hr_ago"], out["bikes_12hr_ago"] = b6, b12
     out["bikes_same_hour_yesterday"] = g["num_bikes_available"].shift(24)
 
-    # capacity-normalized features. NULLIF(capacity, 0): cast to float first (so a
-    # nullable-Int64 <NA> becomes np.nan cleanly), then mask 0 -> NaN. Dividing by
-    # this yields NaN for zero/absent-capacity stations, matching the SQL builder.
+    # NULLIF(capacity, 0): cast to float first so nullable-Int64 <NA> becomes np.nan,
+    # then mask 0 -> NaN. Zero/absent-capacity stations get NaN fill_ratio, matching the SQL builder.
     cap_safe = cap.astype("float64")
     cap_safe = cap_safe.mask(cap_safe == 0)
     out["fill_ratio"] = bikes / cap_safe
@@ -471,9 +442,8 @@ def build_base_features(grid: pd.DataFrame) -> pd.DataFrame:
     roll6 = g["num_bikes_available"].rolling(6, min_periods=1).mean().reset_index(level=0, drop=True)
     out["rolling_mean_fill_ratio_6hr"] = roll6 / cap_safe
 
-    # count-change features (absolute deltas vs lag; classic = total - ebikes).
-    # Lagged classic is derived from the lagged total/ebike pairs so the GBFS
-    # total/ebike overlap never double-counts.
+    # Lagged classic is derived from lagged total/ebike pairs, not from lagged classic
+    # directly — avoids double-counting the GBFS total/ebike overlap.
     cl1 = b1 - e1
     cl3 = b3 - e3
     cl6 = b6 - e6
@@ -485,7 +455,7 @@ def build_base_features(grid: pd.DataFrame) -> pd.DataFrame:
     out["change_classic_1hr"], out["change_classic_3hr"] = classic - cl1, classic - cl3
     out["change_classic_6hr"], out["change_classic_12hr"] = classic - cl6, classic - cl12
 
-    # sub-hourly rates: not computable from hourly data (NULL, see 2026-06-15 decision)
+    # Sub-hourly rates can't be computed from hourly data — deferred per 2026-06-15 decision.
     out["rate_of_change_10min"] = pd.NA
     out["rate_of_change_20min"] = pd.NA
     out["rate_of_change_30min"] = pd.NA
@@ -493,7 +463,7 @@ def build_base_features(grid: pd.DataFrame) -> pd.DataFrame:
 
 
 def add_targets(base: pd.DataFrame, grid: pd.DataFrame, horizons_hours):
-    """Attach a target column per horizon: bikes at (hour + horizon), exact key."""
+    """Build one target column per horizon: bikes at (hour + horizon), exact-key on the grid."""
     g = grid.groupby(level=0)["num_bikes_available"]
     targets = {}
     for h in horizons_hours:
@@ -503,8 +473,8 @@ def add_targets(base: pd.DataFrame, grid: pd.DataFrame, horizons_hours):
 
 def assemble(conn, month_start: date, observed_tbl, forecast_tbl,
              prox, trip, demand, cumflow, legacy_capacity=None) -> pd.DataFrame:
-    """Build the long-form (one row per station x hour x horizon) feature frame for
-    one month, ready to COPY."""
+    """Build the long-form feature frame for one month (one row per station x hour x horizon),
+    ready to COPY into training_features."""
     m_end = month_start + relativedelta(months=1)
     w_start = pd.Timestamp(month_start, tz="UTC") - pd.Timedelta(hours=BACK_BUFFER_HOURS)
     w_end = pd.Timestamp(m_end, tz="UTC") + pd.Timedelta(hours=FWD_BUFFER_HOURS)
@@ -517,8 +487,8 @@ def assemble(conn, month_start: date, observed_tbl, forecast_tbl,
     clean = load_clean_window(conn, w_start, w_end)
     if clean.empty:
         return pd.DataFrame()
-    # Fill NULL capacity for pre-2021 legacy stations. station_information has no
-    # legacy integer IDs so the clean stage froze capacity=NULL for those rows.
+    # station_information has no legacy integer IDs, so the clean stage wrote
+    # capacity=NULL for all pre-2021 rows. Fill from the precomputed MAX(bikes+docks) proxy.
     if legacy_capacity is not None:
         null_mask = clean["capacity"].isna()
         if null_mask.any():
@@ -536,13 +506,10 @@ def assemble(conn, month_start: date, observed_tbl, forecast_tbl,
     horizons_hours = [h // 60 for h in horizons]
     targets = add_targets(base, grid, horizons_hours)
 
-    # --- pick the rows to EMIT: target-month hours that were REAL observations.
-    #     The grid was reindexed to a complete hourly spine so .shift() lags/targets
-    #     are exact-key, but most gap-fill slots are NOT real station-hours. The SQL
-    #     builder emits one row per actual row in station_status_hourly_clean, so we
-    #     match that by requiring a non-null num_bikes_available (the clean stage
-    #     guarantees 0 nulls, so notna() == "this hour was actually observed").
-    #     Buffers (back 24h, forward 48h) only ever feed lags/targets, never emit. ---
+    # Emit only real observations — the complete hourly grid has gap-fill slots that were
+    # never actually observed. notna() on num_bikes_available identifies real rows because
+    # the clean stage guarantees 0 NULLs there. Buffer rows (back 24h / forward 48h)
+    # only ever feed lags and targets; they never end up in the output.
     hour_idx = base.index.get_level_values("hour")
     emit = ((hour_idx >= m_start_ts) & (hour_idx < m_end_ts)
             & base["num_bikes_available"].notna().to_numpy())
@@ -550,7 +517,8 @@ def assemble(conn, month_start: date, observed_tbl, forecast_tbl,
     targets = {h: t[emit].reset_index(drop=True) for h, t in targets.items()}
     print(f"    emit_filter {elapsed()} ({len(base):,} rows)", flush=True)
 
-    # --- time features (Postgres EXTRACT(DOW): Sunday=0 .. Saturday=6) ---
+    # Postgres EXTRACT(DOW) is Sunday=0..Saturday=6; pandas dayofweek is Monday=0.
+    # The (dayofweek+1)%7 conversion matches what's already in training_features.
     hr = base["hour"]
     base["hour_of_day"] = hr.dt.hour
     pg_dow = (hr.dt.dayofweek + 1) % 7      # pandas Mon=0 -> Postgres Sun=0
@@ -558,9 +526,9 @@ def assemble(conn, month_start: date, observed_tbl, forecast_tbl,
     base["month"] = hr.dt.month
     base["season"] = season_of(base["month"])
     base["is_weekend"] = pg_dow.isin([0, 6])
-    base["is_holiday"] = False              # stub (matches SQL builder); TODO: holidays pkg
+    base["is_holiday"] = False              # TODO: wire real US-federal + NYC calendar
 
-    # --- cyclical time encodings ---
+    # Cyclical encodings so the model knows hour 23 and hour 0 are adjacent.
     base["hour_sin"]  = np.sin(2 * math.pi * base["hour_of_day"] / 24)
     base["hour_cos"]  = np.cos(2 * math.pi * base["hour_of_day"] / 24)
     base["dow_sin"]   = np.sin(2 * math.pi * base["day_of_week"] / 7)
@@ -568,22 +536,20 @@ def assemble(conn, month_start: date, observed_tbl, forecast_tbl,
     base["month_sin"] = np.sin(2 * math.pi * base["month"] / 12)
     base["month_cos"] = np.cos(2 * math.pi * base["month"] / 12)
 
-    # --- observed weather, static, demand (same for every horizon) ---
+    # Weather, static features, and demand signals are the same for every horizon.
     obs = load_observed_weather(conn, observed_tbl, w_start, w_end)
     base = base.merge(obs, on="hour", how="left")
     print(f"    merge_weather {elapsed()}", flush=True)
     base = base.merge(prox, on="station_id", how="left")
     base = base.merge(trip, on="station_id", how="left")
 
-    # Load flow with back buffer so net_flow lags can reach back up to 6h before
-    # the month start (w_start covers 24h back, which is more than enough).
+    # Back buffer covers 24h before month start — more than enough for the 6h net_flow lag.
     flow = load_flow(conn, w_start, m_end_ts)
     print(f"    load_flow {elapsed()} ({len(flow):,} rows)", flush=True)
-    # Current-hour flow: filter to target month before merging departures/arrivals.
+    # Current-hour flow: restrict to target month before merging (buffer rows aren't emitted).
     flow_current = flow[flow["hour"] >= m_start_ts]
     base = base.merge(flow_current, on=["station_id", "hour"], how="left")
-    # COALESCE(..., 0): stations with no trips this hour get 0 departures/arrivals.
-    # to_numeric avoids the object-dtype fillna downcast warning on the left-join NaNs.
+    # Stations with no trips this hour get 0 — COALESCE equivalent.
     base["departures_this_hour"] = pd.to_numeric(base["departures"], errors="coerce").fillna(0)
     base["arrivals_this_hour"] = pd.to_numeric(base["arrivals"], errors="coerce").fillna(0)
     base = base.merge(
@@ -591,11 +557,11 @@ def assemble(conn, month_start: date, observed_tbl, forecast_tbl,
         right_on=["station_id", "hour_of_day", "day_of_week"], how="left")
     print(f"    merge_demand {elapsed()}", flush=True)
 
-    # --- cumulative expected net flow (precomputed lookup keyed by time-of-week) ---
+    # Cumulative expected net flow — precomputed lookup keyed by (station, time-of-week).
     base = base.merge(
         cumflow, on=["station_id", "hour_of_day", "day_of_week"], how="left")
 
-    # --- net-flow momentum lags (flow already loaded with back buffer above) ---
+    # Net-flow momentum lags — flow is already loaded with the back buffer above.
     flow_nf = flow.assign(
         net_flow=flow["arrivals"] - flow["departures"]
     )[["station_id", "hour", "net_flow"]]
@@ -608,7 +574,7 @@ def assemble(conn, month_start: date, observed_tbl, forecast_tbl,
             on=["station_id", "hour"], how="left")
     print(f"    merge_tier1 {elapsed()}", flush=True)
 
-    # --- explode to long form: one block per horizon with target + forecast wx ---
+    # Explode to long form — one block per horizon with its target and matched forecast weather.
     fc_raw = load_forecast(conn, forecast_tbl, w_start, w_end)
     print(f"    load_forecast {elapsed()}", flush=True)
     blocks = []
@@ -617,7 +583,7 @@ def assemble(conn, month_start: date, observed_tbl, forecast_tbl,
         blk["horizon_minutes"] = h_min
         tgt = targets[h_hr]
         blk["bikes_available_at_horizon"] = tgt.values
-        blk = blk[blk["bikes_available_at_horizon"].notna()].copy()   # drop NULL targets
+        blk = blk[blk["bikes_available_at_horizon"].notna()].copy()
         blk["bike_available_binary"] = (blk["bikes_available_at_horizon"] > 0).astype("Int64")
 
         # forecast weather: valid_time = hour + horizon, matched per horizon
@@ -637,11 +603,10 @@ def copy_into_features(conn, df: pd.DataFrame, table: str = DEFAULT_TABLE,
                        fast: bool = False) -> int:
     """COPY assembled rows into the target table.
 
-    fast=False (default): COPY → temp staging → INSERT ON CONFLICT DO NOTHING.
-        Safe for incremental monthly retrain runs where rows may already exist.
-    fast=True: COPY directly, synchronous_commit=off, no conflict check.
-        Use for backfill after a TRUNCATE — ~2-3x faster per month.
-        If the process dies mid-run: TRUNCATE and re-run.
+    fast=False: COPY -> temp staging -> INSERT ON CONFLICT DO NOTHING. Safe for
+    incremental monthly retrain runs where rows from a prior run may already exist.
+    fast=True: COPY directly with synchronous_commit=off. Use after TRUNCATE only —
+    if the process dies mid-run, TRUNCATE and re-run from scratch.
     """
     if df.empty:
         return 0
@@ -707,10 +672,12 @@ def build_month(conn, month_start: date, prox, trip, demand, cumflow,
 
 
 def _worker(args):
-    """Top-level worker for multiprocessing.Pool — must be picklable (no lambdas).
-    Each worker opens its own DB connection and processes its assigned months
-    sequentially. prox/trip/demand/cumflow/legacy_capacity are passed by value
-    (pickled once per worker at pool startup, ~few MB total)."""
+    """Multiprocessing.Pool worker — must be a top-level function (no lambdas) to pickle.
+
+    Each worker gets its own DB connection and processes its slice of months sequentially.
+    The static tables (prox, trip, demand, cumflow, legacy_capacity) are pickled once
+    per worker at pool startup — a few MB total, not a bottleneck.
+    """
     months, prox, trip, demand, cumflow, table, fast, legacy_capacity = args
     conn = get_conn()
     try:
