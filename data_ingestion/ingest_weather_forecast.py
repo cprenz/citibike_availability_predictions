@@ -58,7 +58,7 @@ def last_n_mondays(n):
 
 
 def fetch_run(run_date):
-    end_date = min(run_date + timedelta(days=FORECAST_DAYS - 1), date.today() - timedelta(days=1))
+    end_date = run_date + timedelta(days=FORECAST_DAYS - 1)
     params = {
         "latitude": NYC_LAT,
         "longitude": NYC_LON,
