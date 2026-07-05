@@ -39,6 +39,19 @@ HORIZONS = [60, 180, 360, 720, 1440, 2880]
 HORIZON_LABELS = {60: "1hr", 180: "3hr", 360: "6hr",
                   720: "12hr", 1440: "24hr", 2880: "multi-day"}
 
+# Platt-calibrated probability thresholds chosen from the 2.09 precision/recall sweep.
+# Precision at each threshold is comfortably above the ~91.8% base rate; empty-station
+# recall ranges from 26% (multi-day) to 50% (1hr). Web app: flag a station "available"
+# when predicted_prob_logistic >= the threshold for that horizon.
+PLATT_THRESHOLDS = {
+    60:   0.41,
+    180:  0.42,
+    360:  0.45,
+    720:  0.43,
+    1440: 0.46,
+    2880: 0.50,
+}
+
 # Cap on how many missed hourly runs get auto-replayed on startup. A multi-day
 # outage likely means station_status has a matching gap anyway (ingest.py was
 # down too), so replaying past this point wouldn't recover real predictions —
@@ -67,14 +80,15 @@ def get_conn():
 # ---------------------------------------------------------------------------
 
 def load_artifacts():
-    """Load all 18 .joblib artifacts from models/."""
+    """Load all 18 .joblib artifacts + Platt scalers from models/."""
     lgbm, linear, logistic = {}, {}, {}
     for h in HORIZONS:
         lgbm[h]     = joblib.load(MODELS_DIR / f"lgbm_regression_{h}min.joblib")
         linear[h]   = joblib.load(MODELS_DIR / f"linear_regression_{h}min.joblib")
         logistic[h] = joblib.load(MODELS_DIR / f"logistic_classification_{h}min.joblib")
-    print(f"Loaded 18 artifacts ({len(HORIZONS)} horizons x 3 models)")
-    return lgbm, linear, logistic
+    platt = joblib.load(MODELS_DIR / "logistic_platt_scalers.joblib")
+    print(f"Loaded 18 artifacts + Platt scalers ({len(HORIZONS)} horizons x 3 models)")
+    return lgbm, linear, logistic, platt
 
 
 # ---------------------------------------------------------------------------
@@ -328,7 +342,8 @@ def load_forecast(conn, now_hour: pd.Timestamp) -> pd.DataFrame:
 
 def score_horizon(base: pd.DataFrame, h: int, fc: pd.DataFrame,
                   now_hour: pd.Timestamp,
-                  lgbm_model, linear_artifact, logistic_model) -> tuple:
+                  lgbm_model, linear_artifact, logistic_model,
+                  platt_scaler) -> tuple:
     """Add forecast weather for this horizon, score all 3 models.
 
     Returns (predictions_df, stats_dict) where stats_dict contains per-model
@@ -347,9 +362,15 @@ def score_horizon(base: pd.DataFrame, h: int, fc: pd.DataFrame,
 
     X = row[FEATURE_COLS].copy()
 
-    lgbm_pred   = lgbm_model.predict(X)
-    linear_pred = linear_artifact["pipeline"].predict(X)
-    logit_prob  = logistic_model.predict_proba(X)[:, 1]
+    lgbm_pred   = np.clip(lgbm_model.predict(X), 0, None)
+    linear_pred = np.clip(linear_artifact["pipeline"].predict(X), 0, None)
+    raw_prob    = logistic_model.predict_proba(X)[:, 1]
+
+    # Platt scaling: re-calibrate raw log-odds through the per-horizon scaler fitted
+    # in notebook 2.09. Fixes the overconfidence in the 0.60-0.75 range (2.06 finding).
+    log_odds   = np.log(np.clip(raw_prob, 1e-7, 1 - 1e-7) /
+                        (1 - np.clip(raw_prob, 1e-7, 1 - 1e-7)))
+    logit_prob = platt_scaler.predict_proba(log_odds.reshape(-1, 1))[:, 1]
 
     # Same serving pattern as 2.04b/2.08b/2.08c: point prediction + stored offsets,
     # lower bound clipped at 0 (can't have negative bikes).
@@ -479,7 +500,7 @@ def run_scoring_pass(conn, artifacts: tuple, now_hour: pd.Timestamp):
     reading the clock, so replaying a past hour reconstructs the feature state
     as it existed then, from whatever station_status/weather data still covers it.
     """
-    lgbm_models, linear_models, logistic_models = artifacts
+    lgbm_models, linear_models, logistic_models, platt_scalers = artifacts
     t0 = time.time()
     print(f"Scoring at {now_hour.isoformat()}")
 
@@ -521,7 +542,8 @@ def run_scoring_pass(conn, artifacts: tuple, now_hour: pd.Timestamp):
         h_start = time.time()
         preds, stats = score_horizon(
             base, h, fc, now_hour,
-            lgbm_models[h], linear_models[h], logistic_models[h])
+            lgbm_models[h], linear_models[h], logistic_models[h],
+            platt_scalers[h])
         stats["horizon_minutes"] = h
         stats["duration_seconds"] = round(time.time() - h_start, 2)
         all_preds.append(preds)
