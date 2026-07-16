@@ -18,7 +18,7 @@ function isValidEmail(value: string): boolean {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value);
 }
 
-function getPrivateKey() {
+function getPrivateKey(): string {
   let pem: string;
   if (process.env.SNOWFLAKE_PRIVATE_KEY) {
     pem = process.env.SNOWFLAKE_PRIVATE_KEY.replace(/\\n/g, "\n");
@@ -31,7 +31,9 @@ function getPrivateKey() {
     );
     pem = fs.readFileSync(keyPath, "utf8");
   }
-  return createPrivateKey({ key: pem, format: "pem" });
+  return createPrivateKey({ key: pem, format: "pem" })
+    .export({ type: "pkcs8", format: "pem" })
+    .toString();
 }
 
 function executeSnowflake(sql: string, binds: unknown[]): Promise<void> {

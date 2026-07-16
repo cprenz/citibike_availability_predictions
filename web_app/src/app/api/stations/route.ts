@@ -43,7 +43,7 @@ const SQL = `
   ORDER BY si.station_id, mp.horizon_minutes
 `;
 
-function getPrivateKey() {
+function getPrivateKey(): string {
   let pem: string;
   // Vercel: PEM stored in env var (newlines may arrive as literal \n or real \n)
   if (process.env.SNOWFLAKE_PRIVATE_KEY) {
@@ -58,9 +58,12 @@ function getPrivateKey() {
     );
     pem = fs.readFileSync(keyPath, "utf8");
   }
-  // Parse through Node crypto to normalize PEM formatting before handing to
-  // Snowflake SDK — handles any whitespace/line-ending quirks from Vercel env vars.
-  return createPrivateKey({ key: pem, format: "pem" });
+  // Round-trip through Node crypto to normalize PEM formatting — scrubs any
+  // whitespace/line-ending quirks from Vercel env vars, then re-export as the
+  // clean PEM string the Snowflake SDK expects for privateKey.
+  return createPrivateKey({ key: pem, format: "pem" })
+    .export({ type: "pkcs8", format: "pem" })
+    .toString();
 }
 
 function querySnowflake(sql: string): Promise<SnowflakeRow[]> {
