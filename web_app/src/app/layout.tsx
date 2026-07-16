@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
+import Script from "next/script";
 import "./globals.css";
 
 const geistSans = Geist({
@@ -44,6 +45,26 @@ export default function RootLayout({
           </a>
         </nav>
         <div className="flex flex-1 flex-col">{children}</div>
+
+        {/* Google Analytics 4 */}
+        <Script
+          src="https://www.googletagmanager.com/gtag/js?id=G-ZW0S7TE9CW"
+          strategy="afterInteractive"
+        />
+        <Script id="ga4-init" strategy="afterInteractive">
+          {`
+            window.dataLayer = window.dataLayer || [];
+            function gtag(){dataLayer.push(arguments);}
+            gtag('js', new Date());
+            gtag('config', 'G-ZW0S7TE9CW');
+          `}
+        </Script>
+
+        {/* Contentsquare (Hotjar) */}
+        <Script
+          src="https://t.contentsquare.net/uxa/d646b9388a72e.js"
+          strategy="afterInteractive"
+        />
       </body>
     </html>
   );
