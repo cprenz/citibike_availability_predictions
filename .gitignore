@@ -53,3 +53,4 @@ notebooks/*.py
 data_ingestion/snowflake_key.p8
 data_ingestion/snowflake_key.pub
 data_ingestion/google_sheets_key.json
+data_ingestion/citibike-tableau-501513-f84b1b0653dd.json
