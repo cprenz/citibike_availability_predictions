@@ -50,3 +50,6 @@ Thumbs.db
 # --- Notebooks ---
 .ipynb_checkpoints/
 notebooks/*.py
+data_ingestion/snowflake_key.p8
+data_ingestion/snowflake_key.pub
+data_ingestion/google_sheets_key.json
