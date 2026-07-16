@@ -1,15 +1,9 @@
 import { NextResponse } from "next/server";
-import { Pool } from "pg";
+import snowflake from "snowflake-sdk";
+import fs from "fs";
+import path from "path";
 
-const pool = new Pool({
-  host: process.env.PGHOST ?? "localhost",
-  port: parseInt(process.env.PGPORT ?? "5555"),
-  database: process.env.PGDATABASE ?? "citibike",
-  user: process.env.PGUSER ?? "citibike_admin",
-  password: process.env.PGPASSWORD ?? "password",
-});
-
-const VALID_HORIZONS = new Set([60, 180, 360, 720, 1440, 10080]);
+const VALID_HORIZONS = new Set([60, 180, 360, 720, 1440, 2880]);
 
 type SubscribeBody = {
   email?: string | null;
@@ -21,6 +15,49 @@ type SubscribeBody = {
 
 function isValidEmail(value: string): boolean {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value);
+}
+
+function getPrivateKey(): string {
+  if (process.env.SNOWFLAKE_PRIVATE_KEY) {
+    return process.env.SNOWFLAKE_PRIVATE_KEY.replace(/\\n/g, "\n");
+  }
+  const keyPath = path.resolve(
+    process.cwd(),
+    "..",
+    "data_ingestion",
+    "snowflake_key.p8"
+  );
+  return fs.readFileSync(keyPath, "utf8");
+}
+
+function executeSnowflake(sql: string, binds: unknown[]): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const conn = snowflake.createConnection({
+      account: process.env.SNOWFLAKE_ACCOUNT!,
+      username: process.env.SNOWFLAKE_USER!,
+      authenticator: "SNOWFLAKE_JWT",
+      privateKey: getPrivateKey(),
+      database: process.env.SNOWFLAKE_DATABASE ?? "CITIBIKE",
+      schema: process.env.SNOWFLAKE_SCHEMA ?? "PUBLIC",
+      warehouse: process.env.SNOWFLAKE_WAREHOUSE ?? "COMPUTE_WH",
+    });
+
+    conn.connect((connectErr) => {
+      if (connectErr) {
+        reject(connectErr);
+        return;
+      }
+      conn.execute({
+        sqlText: sql,
+        binds: binds as snowflake.Binds,
+        complete: (execErr) => {
+          conn.destroy(() => {});
+          if (execErr) reject(execErr);
+          else resolve();
+        },
+      });
+    });
+  });
 }
 
 export async function POST(request: Request) {
@@ -40,7 +77,6 @@ export async function POST(request: Request) {
       ? body.threshold
       : null;
 
-  // Validation — mirrors the subscribers_contact_check DB constraint plus app rules
   if (!email && !phone) {
     return NextResponse.json(
       { error: "Provide at least an email or a phone number." },
@@ -67,27 +103,27 @@ export async function POST(request: Request) {
     );
   }
 
-  const client = await pool.connect();
+  // Build a single multi-row INSERT — avoids needing explicit transactions.
+  const placeholders = cleanHorizons.map(() => "(?, ?, ?, ?, ?)").join(", ");
+  const binds = cleanHorizons.flatMap((h) => [
+    email,
+    phone,
+    stationId,
+    h,
+    threshold,
+  ]);
+
   try {
-    // One row per (contact, station, horizon) — matches the subscribers grain.
-    await client.query("BEGIN");
-    for (const horizon of cleanHorizons) {
-      await client.query(
-        `INSERT INTO subscribers (email, phone, station_id, horizon_minutes, threshold)
-         VALUES ($1, $2, $3, $4, $5)`,
-        [email, phone, stationId, horizon, threshold]
-      );
-    }
-    await client.query("COMMIT");
+    await executeSnowflake(
+      `INSERT INTO subscribers (email, phone, station_id, horizon_minutes, threshold) VALUES ${placeholders}`,
+      binds
+    );
     return NextResponse.json({ ok: true, count: cleanHorizons.length });
   } catch (err) {
-    await client.query("ROLLBACK");
     console.error("Subscribe API error:", err);
     return NextResponse.json(
       { error: "Could not save your subscription. Try again." },
       { status: 500 }
     );
-  } finally {
-    client.release();
   }
 }

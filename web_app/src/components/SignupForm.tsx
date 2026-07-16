@@ -8,7 +8,7 @@ const HORIZONS = [
   { minutes: 360, label: "6 hours" },
   { minutes: 720, label: "12 hours" },
   { minutes: 1440, label: "24 hours" },
-  { minutes: 10080, label: "Multi-day" },
+  { minutes: 2880, label: "Multi-day" },
 ];
 
 type StationOption = { station_id: string; station_name: string };
@@ -136,7 +136,7 @@ export default function SignupForm({
     >
       <div>
         <label className="mb-1 block text-sm font-medium" htmlFor="email">
-          Email
+          Email <span className="text-zinc-500">(optional)</span>
         </label>
         <input
           id="email"
@@ -161,7 +161,7 @@ export default function SignupForm({
           className="w-full rounded-lg border border-black/15 bg-transparent px-3 py-2 text-sm outline-none focus:border-blue-500 dark:border-white/20"
         />
         <p className="mt-1 text-xs text-zinc-500">
-          Provide at least one of email or phone.
+          At least one of email or phone is required.
         </p>
       </div>
 
