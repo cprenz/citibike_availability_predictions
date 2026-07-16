@@ -180,9 +180,7 @@ export default function Map() {
           horizons: string;
         };
         const horizons: HorizonData[] = JSON.parse(p.horizons);
-        const coords = (
-          feat.geometry as { coordinates: [number, number] }
-        ).coordinates;
+        const coords = (feat.geometry as GeoJSON.Point).coordinates as [number, number];
 
         popupRef.current!
           .setLngLat(coords)
