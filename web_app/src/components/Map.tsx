@@ -60,37 +60,41 @@ function buildGeoJSON(
   };
 }
 
-function buildPopupHTML(name: string, capacity: number, horizons: HorizonData[], stationId: string): string {
+function buildPopupHTML(name: string, capacity: number, horizons: HorizonData[]): string {
   const rows = HORIZONS.map((h) => {
     const hz = horizons.find((x) => x.horizon_minutes === h.minutes);
     const prob = hz != null ? `${Math.round(hz.predicted_prob_logistic * 100)}%` : "--";
     const bikes = hz != null ? Math.round(hz.predicted_value_lgbm) : "--";
     const color = hz != null ? probColor(hz.predicted_prob_logistic) : "#666";
     return `<tr>
-      <td style="padding:3px 8px;color:#aaa">${h.label}</td>
-      <td style="padding:3px 8px;text-align:right">${bikes}</td>
+      <td style="padding:3px 8px;color:#333">${h.label}</td>
+      <td style="padding:3px 8px;text-align:right;color:#111;font-weight:600">${bikes}</td>
       <td style="padding:3px 8px;text-align:right;color:${color};font-weight:600">${prob}</td>
     </tr>`;
   }).join("");
 
   return `
     <div style="font-family:system-ui,sans-serif;padding:4px 2px">
-      <div style="font-weight:700;font-size:13px;margin-bottom:3px">${name}</div>
-      <div style="font-size:11px;color:#999;margin-bottom:10px">Capacity: ${capacity} docks</div>
+      <div style="font-weight:700;font-size:13px;margin-bottom:3px;color:#000">${name}</div>
+      <div style="font-size:11px;color:#666;margin-bottom:10px">Capacity: ${capacity} docks</div>
       <table style="width:100%;font-size:12px;border-collapse:collapse">
-        <tr style="font-size:11px;color:#777">
+        <tr style="font-size:11px;color:#555">
           <th style="text-align:left;padding:3px 8px">Horizon</th>
           <th style="text-align:right;padding:3px 8px">Bikes</th>
           <th style="text-align:right;padding:3px 8px">Prob.</th>
         </tr>
         ${rows}
       </table>
-      <a href="/signup?station_id=${stationId}"
-         style="display:block;margin-top:12px;padding:8px;background:#2563eb;color:#fff;
-                text-align:center;border-radius:6px;text-decoration:none;
-                font-size:12px;font-weight:600">
-        Get alerts for this station
-      </a>
+      <form data-signup style="margin-top:12px;display:flex;flex-direction:column;gap:6px">
+        <input type="email" name="email" placeholder="you@email.com" required
+          style="padding:7px 8px;border:1px solid #ccc;border-radius:6px;font-size:12px;color:#111" />
+        <button type="submit"
+          style="padding:8px;background:#2563eb;color:#fff;border:none;border-radius:6px;
+                 font-size:12px;font-weight:600;cursor:pointer">
+          Get alerts for this station
+        </button>
+        <div data-status style="font-size:11px;text-align:center;min-height:14px"></div>
+      </form>
     </div>
   `;
 }
@@ -105,6 +109,13 @@ export default function Map() {
   const [stations, setStations] = useState<Station[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+
+  // The map init effect runs once, so its handlers would capture a stale
+  // selectedHorizon. Mirror it in a ref the hover/subscribe handler can read live.
+  const selectedHorizonRef = useRef(selectedHorizon);
+  useEffect(() => {
+    selectedHorizonRef.current = selectedHorizon;
+  }, [selectedHorizon]);
 
   // Fetch station predictions
   useEffect(() => {
@@ -137,10 +148,6 @@ export default function Map() {
     });
 
     map.addControl(new mapboxgl.NavigationControl(), "top-right");
-    popupRef.current = new mapboxgl.Popup({
-      closeButton: true,
-      maxWidth: "280px",
-    });
 
     map.on("load", () => {
       map.addSource("stations", {
@@ -170,9 +177,31 @@ export default function Map() {
         },
       });
 
-      map.on("click", "stations-circle", (e) => {
-        const feat = e.features?.[0];
-        if (!feat) return;
+      // Hover UX: open a popup on mouseenter. Because the popup also holds an
+      // interactive signup form, we can't close it the instant the pointer
+      // leaves the dot — a short timer keeps it alive while the user moves onto
+      // the popup, and focusing the email field "pins" it open entirely.
+      let closeTimer: number | null = null;
+      let pinned = false;
+
+      const closePopup = () => {
+        popupRef.current?.remove();
+        popupRef.current = null;
+        pinned = false;
+      };
+      const cancelClose = () => {
+        if (closeTimer !== null) {
+          window.clearTimeout(closeTimer);
+          closeTimer = null;
+        }
+      };
+      const scheduleClose = () => {
+        if (pinned) return;
+        cancelClose();
+        closeTimer = window.setTimeout(closePopup, 300);
+      };
+
+      const showPopup = (feat: mapboxgl.MapGeoJSONFeature) => {
         const p = feat.properties as {
           id: string;
           name: string;
@@ -182,17 +211,75 @@ export default function Map() {
         const horizons: HorizonData[] = JSON.parse(p.horizons);
         const coords = (feat.geometry as GeoJSON.Point).coordinates as [number, number];
 
-        popupRef.current!
+        cancelClose();
+        popupRef.current?.remove();
+        const popup = new mapboxgl.Popup({
+          closeButton: true,
+          closeOnClick: false,
+          focusAfterOpen: false,
+          maxWidth: "280px",
+        });
+        popupRef.current = popup;
+        popup
           .setLngLat(coords)
-          .setHTML(buildPopupHTML(p.name, p.capacity, horizons, p.id))
+          .setHTML(buildPopupHTML(p.name, p.capacity, horizons))
           .addTo(map);
-      });
 
-      map.on("mouseenter", "stations-circle", () => {
+        const el = popup.getElement();
+        el.addEventListener("mouseenter", cancelClose);
+        el.addEventListener("mouseleave", scheduleClose);
+
+        const form = el.querySelector("form[data-signup]") as HTMLFormElement | null;
+        if (!form) return;
+        const statusEl = form.querySelector("[data-status]") as HTMLElement;
+        const emailEl = form.querySelector('input[name="email"]') as HTMLInputElement;
+        const buttonEl = form.querySelector("button") as HTMLButtonElement;
+
+        // Keep the popup open the whole time the user is filling out the form.
+        form.addEventListener("focusin", () => {
+          pinned = true;
+          cancelClose();
+        });
+
+        form.addEventListener("submit", async (ev) => {
+          ev.preventDefault();
+          const email = emailEl.value.trim();
+          if (!email) return;
+          statusEl.textContent = "Signing up...";
+          statusEl.style.color = "#666";
+          try {
+            const res = await fetch("/api/subscribe", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                email,
+                station_id: p.id,
+                horizons: [selectedHorizonRef.current],
+                threshold: 1,
+              }),
+            });
+            const data = await res.json();
+            if (!res.ok) throw new Error(data.error ?? "Signup failed");
+            statusEl.textContent = "You're signed up!";
+            statusEl.style.color = "#16a34a";
+            emailEl.disabled = true;
+            buttonEl.disabled = true;
+          } catch (err) {
+            statusEl.textContent =
+              err instanceof Error ? err.message : "Signup failed";
+            statusEl.style.color = "#dc2626";
+          }
+        });
+      };
+
+      map.on("mouseenter", "stations-circle", (e) => {
         map.getCanvas().style.cursor = "pointer";
+        const feat = e.features?.[0];
+        if (feat) showPopup(feat);
       });
       map.on("mouseleave", "stations-circle", () => {
         map.getCanvas().style.cursor = "";
+        scheduleClose();
       });
 
       mapReadyRef.current = true;
