@@ -1,0 +1,663 @@
+LOGISTIC REGRESSION — INTERVIEW STUDY GUIDE
+Using the Citibike bike availability model as a running example.
+============================================================
+
+
+============================================================
+BASICS
+============================================================
+
+Q: What is logistic regression?
+
+A: A supervised classification algorithm that predicts the probability that
+   a data point belongs to a class. Despite the name, it is used for
+   classification, not regression.
+
+   It works by fitting a linear equation to the features, then passing the
+   result through a sigmoid function to squeeze the output into a probability
+   between 0 and 1.
+
+   Citibike example: given fill ratio, weather, time of day, and lag features,
+   the model outputs "82% chance a bike is available at this station in 3 hours."
+
+
+Q: Why is it called regression if it is a classification algorithm?
+
+A: Because the underlying mechanics are the same as linear regression — it
+   computes a weighted sum of features (z = w1*x1 + w2*x2 + ...). The difference
+   is that it then passes z through the sigmoid function to produce a probability,
+   rather than outputting z directly.
+
+   The model is technically predicting a continuous value (the probability), and
+   then you apply a threshold to convert that to a class label. The regression
+   is happening on the probability, not the class.
+
+
+Q: What is the sigmoid function and why does logistic regression use it?
+
+A: The sigmoid function:
+       P = 1 / (1 + e^-z)
+
+   It takes any value of z — positive or negative, large or small — and maps it
+   to a number between 0 and 1. This is necessary because a raw linear equation
+   can output any number, but probabilities must be between 0 and 1.
+
+   Two other useful properties:
+   - It is differentiable everywhere, which allows gradient descent to work.
+   - It squashes extreme values (outliers) toward 0 or 1, reducing their impact
+     compared to using the raw distance from the decision boundary.
+
+
+Q: What is a decision boundary?
+
+A: The line (or hyperplane in higher dimensions) that separates the two classes.
+   Points on one side are predicted positive, points on the other are predicted
+   negative.
+
+   In logistic regression the decision boundary is always linear — it is a
+   straight line (or flat plane). This is a key limitation: if the true boundary
+   between classes is curved, logistic regression will struggle without feature
+   engineering.
+
+   The boundary sits where z = 0, which corresponds to P = 0.5. Changing the
+   threshold moves the effective boundary without changing the model.
+
+
+Q: What is squashing?
+
+A: The sigmoid function "squashes" the entire range of real numbers into the
+   interval (0, 1). No matter how large or small z is, the output is always a
+   valid probability.
+
+   This matters because: raw outlier values that produce very large or very
+   small z get compressed toward 0 or 1 rather than exploding the output.
+   The model becomes more robust to extreme feature values.
+
+
+Q: What is the difference between overfitting and underfitting?
+
+A: Overfitting: the model memorizes the training data too closely, including
+   its noise. It performs well on training data but poorly on new data.
+   Signs: high training accuracy, much lower validation accuracy.
+
+   Underfitting: the model is too simple to capture the real patterns.
+   It performs poorly on both training and new data.
+   Signs: low accuracy on both.
+
+   For logistic regression specifically: overfitting happens when you have
+   many features relative to your sample size, or highly correlated features.
+   Regularization (L1 or L2) is the main fix.
+
+   Your model (12M rows, ~75 features) is almost certainly underfitting rather
+   than overfitting — which is why penalty=None (no regularization) gave the
+   same or better results than L2.
+
+
+Q: How does regularization prevent overfitting?
+
+A: Regularization adds a penalty to the loss function based on the size of the
+   coefficients. This discourages the model from assigning large weights to any
+   single feature, which forces it to spread signal across multiple features
+   rather than over-relying on any one.
+
+   L2 (Ridge): penalty = lambda * sum(w^2)
+   Shrinks all coefficients toward zero but never to exactly zero.
+   Keeps all features in the model.
+
+   L1 (Lasso): penalty = lambda * sum(|w|)
+   Can shrink coefficients to exactly zero, removing features entirely.
+   Built-in feature selection.
+
+   Lambda controls the strength: higher lambda = more shrinkage = simpler model.
+   Too high and you underfit. Too low and the penalty does nothing.
+
+
+Q: What are the key assumptions of logistic regression?
+
+A: 1. Binary (or ordinal) outcome — the target is categorical, not continuous.
+   2. Independent observations — one row should not influence another.
+      (This is violated in time series data like Citibike — the same station
+      appears across many timestamps. Acknowledged as a limitation.)
+   3. Little multicollinearity — highly correlated features make individual
+      coefficients unstable. (Your model has exact collinearity by construction:
+      change_bikes = change_ebikes + change_classic. The statsmodels QR step
+      drops these.)
+   4. Linear relationship between each feature and the log-odds of the outcome.
+      Not between the feature and the probability — that relationship is S-shaped.
+   5. Large sample size — logistic regression needs enough data to estimate
+      coefficients reliably. At 12M rows this is not a concern.
+
+   Note: unlike linear regression, logistic regression does NOT assume features
+   are normally distributed.
+
+
+Q: What is multicollinearity and why does it matter?
+
+A: Multicollinearity is when two or more features are highly correlated with
+   each other. The model can achieve the same predictions using many different
+   combinations of their coefficients, so the individual coefficients become
+   unstable and hard to interpret.
+
+   It does NOT hurt predictive accuracy — the model's predictions are still
+   valid. It only hurts interpretability.
+
+   Citibike example: change_bikes_1hr = change_ebikes_1hr + change_classic_1hr
+   by construction. These three are perfectly collinear. The statsmodels QR
+   decomposition step in notebook 2.05 automatically detects and drops the
+   redundant columns before fitting the inference table.
+
+   Fix options: drop one of the correlated features, combine them, or use
+   Ridge regularization (L2 shrinks correlated coefficients together).
+
+
+============================================================
+CORE CONCEPTS
+============================================================
+
+1. THE FULL PIPELINE
+--------------------
+Features -> weighted sum (z) -> sigmoid -> probability -> threshold -> prediction -> confusion matrix
+
+Training never uses the confusion matrix. It minimizes log loss, which penalizes
+confident wrong predictions. The confusion matrix is for evaluation only.
+
+
+2. THE TWO KEY EQUATIONS
+-------------------------
+Sigmoid (what makes logistic regression "logistic"):
+    P = 1 / (1 + e^-z)
+Squashes any z into 0-1. That's your probability: "82% chance bikes available."
+
+Log loss (what training minimizes):
+    -[y * log(P) + (1-y) * log(1-P)]
+Station was empty (y=0) but model said 99% available -> log loss is huge.
+That's what forces the weights to update.
+
+
+3. THE CONFUSION MATRIX
+------------------------
+Every metric below is built from these four numbers.
+Positive = "bikes available". Negative = "station empty".
+
+                        Predicted: available    Predicted: empty
+Actually available      True Positive (TP)      False Negative (FN)
+                        Correct                 Missed — bikes were there,
+                                                model said empty
+Actually empty          False Positive (FP)     True Negative (TN)
+                        False promise — said    Correct
+                        available, was empty
+
+For this app, FP is the costly error. A user walks to a station and finds nothing.
+FN is less damaging — the user skips a station that actually had bikes.
+
+
+4. PRECISION AND RECALL — THE 100-BIKE EXAMPLE
+------------------------------------------------
+The model predicts "bikes available" 100 times.
+85 were correct (TP). 15 were wrong (FP).
+There were 90 real available cases total, so it missed 5 (FN).
+
+Precision:
+    TP / (TP + FP) = 85 / (85 + 15) = 85%
+
+Recall:
+    TP / (TP + FN) = 85 / (85 + 5) = 94%
+
+The intuition for which denominator to use:
+    Precision asks "out of MY predictions, how many were right?"
+        -> denominator is what the model said
+    Recall asks "out of the REAL positives, how many did I find?"
+        -> denominator is what actually existed
+    The TP (85) is the same in both — it's just what you're comparing
+    it against that changes.
+
+
+5. WHAT HIGH AND LOW MEAN FOR THIS APP
+---------------------------------------
+High precision:
+    When the app says "bikes available," it's almost always right.
+    Users trust the prediction.
+
+Low precision:
+    Users walk to stations and find them empty.
+    Trust collapses after 1-2 bad trips.
+
+High recall:
+    The app catches nearly every station that has bikes.
+    Users rarely get a "no bikes" warning when bikes were actually there.
+
+Low recall (acceptable for this app):
+    The app sometimes says "empty" when bikes were there.
+    User goes elsewhere — annoying but not trust-breaking.
+
+This asymmetry is why you raise the threshold above 0.5.
+You're trading some recall (miss a few available stations) to gain
+precision (fewer false promises).
+
+
+6. ROC AUC VS PR AUC
+----------------------
+Both are threshold-independent — they summarize performance across ALL thresholds.
+Neither tells you what precision or recall looks like at the threshold you'll deploy.
+
+ROC AUC:
+    Plots recall vs false positive rate at every threshold.
+    Measures overall ranking ability.
+    Weakness: with a 92% positive base rate, false positive rate stays low
+    almost by default — the curve looks good even when precision is poor.
+    Your model: 0.829-0.938 across horizons.
+
+PR AUC (Average Precision):
+    Plots precision vs recall at every threshold.
+    Directly measures how trustworthy predictions are.
+    Better for imbalanced classes — can't be gamed by the dominant class
+    the same way ROC can.
+    Your model: 0.980-0.994 (inflated by the 92% positive base rate).
+
+Rule of thumb:
+    Use ROC AUC to compare models against each other.
+    Use PR AUC when class imbalance is high and precision matters.
+
+
+7. PRECISION VS RECALL IS THE SAME AS FP VS FN TRADEOFF
+---------------------------------------------------------
+Low precision  = too many False Positives  (said "available," was wrong)
+Low recall     = too many False Negatives  (said "empty," was wrong)
+
+Raising the threshold -> fewer FPs -> higher precision -> lower recall
+Lowering the threshold -> fewer FNs -> higher recall -> lower precision
+
+
+8. THRESHOLD SELECTION
+-----------------------
+Default threshold is 0.5. With a 92% base rate this almost certainly
+produces too many false promises.
+
+Three approaches:
+
+Option 1 — Plot precision vs threshold (simplest):
+    Sweep thresholds from 0 to 1, compute precision and recall at each.
+    Pick where precision crosses your target (e.g. >= 90%).
+    Check that recall isn't catastrophically low at that point.
+
+Option 2 — F-beta score:
+    F0.5 weights precision 2x more than recall.
+    Pick the threshold that maximizes F0.5.
+    Use when you want a single number to optimize.
+
+Option 3 — Cost ratio (most rigorous):
+    Assign a cost to FP (e.g. 5 — user walks to empty station).
+    Assign a cost to FN (e.g. 1 — user skips available station).
+    Pick threshold that minimizes expected total cost.
+
+For this app: start with option 1. Apply Platt scaling first since
+the 2.06 calibration check found raw probabilities are overconfident
+in the 0.60-0.75 range at 1hr.
+
+
+9. LARGE SAMPLE SIZE WARNING (important for interviews)
+--------------------------------------------------------
+At 12 million rows, p-values are always near zero — even a feature that
+shifts the prediction by 0.01 bikes will show p < 0.0001. That's not wrong,
+it just doesn't tell you if the effect is meaningful.
+
+What to focus on instead:
+    - Coefficient magnitude (how many bikes does a 1-unit change shift?)
+    - Confidence interval width (very narrow at 12M rows — estimate is precise)
+    - Sign (does the effect go in the expected direction?)
+    - Practical significance vs statistical significance
+
+The interview trap: if you say "everything was significant," a good interviewer
+will ask "so how did you decide what mattered?" Answer: coefficient magnitude,
+domain knowledge, and SHAP feature importance — not p-values.
+
+
+============================================================
+INTERVIEW Q&A
+============================================================
+
+--- YOUR PROJECT QUESTIONS ---
+
+Q: Why is precision the denominator "what the model claimed" and recall "what actually existed"?
+
+A: Precision measures how trustworthy the model's positive predictions are.
+   Its denominator is TP + FP — everything the model said was positive,
+   whether right or wrong. That's "what the model claimed."
+
+   Recall measures how much of the real positive class the model caught.
+   Its denominator is TP + FN — everything that was actually positive,
+   whether the model caught it or missed it. That's "what actually existed."
+
+   The TP count is identical in both formulas. The only difference is whether
+   you're judging the model against its own claims or against reality.
+
+
+Q: Why is a false positive the costly error for the Citibike app?
+
+A: The target is bike_available_binary = 1 (bikes there) or 0 (station empty).
+   A false positive means the model predicted "bikes available" but the station
+   was actually empty. A user sees the prediction, walks over, and finds nothing.
+   That kills trust in the app immediately — one or two bad trips and they stop
+   using it.
+
+   A false negative means the model predicted "empty" when bikes were actually
+   there. The user goes to a different station. Annoying, but the app never made
+   a promise it couldn't keep, so trust stays intact.
+
+   This asymmetry drives the decision to raise the threshold above 0.5 —
+   you're deliberately trading some false negatives to eliminate false positives.
+
+
+Q: Why does ROC AUC flatter imbalanced datasets and PR AUC is more honest?
+
+A: ROC AUC plots recall vs false positive rate (FPR = FP / (FP + TN)).
+   When the negative class is rare (only 8% empty stations here), there are
+   very few true negatives total. That means FPR stays low almost by default —
+   even a model that makes many false positive mistakes looks good on ROC
+   because the denominator (FP + TN) is small.
+
+   PR AUC plots precision vs recall. Precision (TP / (TP + FP)) is directly
+   hurt by false positives regardless of how many true negatives exist.
+   With a 92% positive base rate, a naive model that always predicts "available"
+   would have perfect recall but terrible precision — PR AUC catches that,
+   ROC AUC would not.
+
+   Rule: use ROC AUC to compare models. Use PR AUC when class imbalance is
+   high and the cost of false positives matters.
+
+
+Q: Why raise the threshold above 0.5, and what are you trading when you do?
+
+A: The default 0.5 threshold means: predict "bikes available" whenever the
+   model is more than 50% confident. With a 92% base rate, the model is above
+   50% for almost every prediction — it's biased toward the common class, so
+   it makes a lot of false positive predictions.
+
+   Raising the threshold (say to 0.8) means only predicting "available" when
+   the model is 80% confident. This eliminates many false positives (higher
+   precision) but also causes the model to miss some genuinely available stations
+   that fell in the 50-80% range (lower recall).
+
+   The tradeoff: every point you gain in precision costs you some recall.
+   There is no free lunch — you pick where on that curve makes sense for your
+   specific use case, then commit.
+
+
+--- COMMON INTERVIEW QUESTIONS ---
+
+Q: What is the difference between logistic regression and linear regression?
+
+A: Linear regression predicts a continuous number (e.g. how many bikes).
+   Logistic regression predicts a probability between 0 and 1, then maps that
+   to a class (e.g. will there be a bike or not).
+
+   The key mechanical difference is the sigmoid function. Linear regression
+   outputs z directly. Logistic regression passes z through sigmoid first,
+   which keeps the output bounded between 0 and 1.
+
+   They also use different loss functions. Linear regression minimizes MSE.
+   Logistic regression minimizes log loss (binary cross-entropy).
+
+
+Q: Why can't logistic regression use MSE as its loss function?
+
+A: With MSE, the loss surface becomes non-convex when combined with the sigmoid
+   function — it has multiple local minima, so gradient descent can get stuck
+   and never find the best solution.
+
+   Log loss produces a convex loss surface with a single global minimum,
+   which guarantees gradient descent will converge to the best solution.
+
+   Also practically: log loss penalizes confident wrong predictions very heavily
+   (predicting 99% when the answer is 0 gives a huge loss). MSE would only
+   penalize that as (1 - 0.99)^2 = 0.0001 — nearly nothing, which lets the
+   model get away with being confidently wrong.
+
+
+Q: What are the key assumptions of logistic regression?
+
+A: 1. The outcome is binary (or can be treated as binary).
+   2. Observations are independent of each other.
+   3. Little or no multicollinearity among features — highly correlated
+      features make individual coefficients unstable and hard to interpret.
+   4. A linear relationship between each feature and the log-odds of the outcome.
+      (Not between the feature and the probability — that relationship is S-shaped.)
+   5. No extreme outliers — logistic regression is sensitive to influential points.
+
+   Note: logistic regression does NOT assume the features are normally distributed,
+   unlike LDA. That's one reason it's more flexible.
+
+
+Q: What is L1 vs L2 regularization in logistic regression?
+
+A: Both add a penalty to the loss function to shrink coefficients and prevent
+   overfitting.
+
+   L2 (Ridge): penalty = lambda * sum(w^2)
+   Shrinks all coefficients toward zero but keeps them all in the model.
+   Good when you believe most features contribute something.
+   This is what your model used (penalty=None means no regularization,
+   but Ridge was the benchmark — at 12M rows regularization was inert).
+
+   L1 (Lasso): penalty = lambda * sum(|w|)
+   Can shrink coefficients all the way to exactly zero, effectively removing
+   features from the model. Good for automatic feature selection.
+
+   Elastic Net combines both. Use it when you have many correlated features
+   and want some sparsity but not as aggressive as pure L1.
+
+
+Q: How do you interpret a logistic regression coefficient?
+
+A: A coefficient tells you how the log-odds of the outcome change for a
+   one-unit increase in that feature, holding everything else constant.
+
+   Log-odds = log(P / (1-P))
+
+   In practice for interviews: a positive coefficient means that as the feature
+   increases, the probability of the positive class increases. A negative
+   coefficient means the probability decreases.
+
+   The magnitude tells you how strong the effect is — but only if features
+   are on the same scale. Raw coefficients are not directly comparable across
+   features with different units. That's why you standardize features before
+   fitting if you want to compare coefficients.
+
+   Citibike example: a large positive coefficient on fill_ratio means stations
+   that are currently fuller are much more likely to still have bikes at the
+   horizon. Makes intuitive sense.
+
+
+Q: What is the difference between logistic regression and a decision tree?
+
+A: Logistic regression finds a single linear decision boundary in feature space.
+   It works well when the relationship between features and the outcome is
+   roughly linear (or log-linear). It's fast, interpretable, and gives
+   calibrated probabilities.
+
+   A decision tree partitions the feature space into rectangular regions using
+   a series of if/else splits. It can capture non-linear relationships and
+   interactions without you having to engineer them. But a single tree
+   overfits easily and gives poorly calibrated probabilities.
+
+   For your project: logistic regression is the interpretable production model
+   (you can explain exactly why a station scored 82%). LightGBM (gradient
+   boosted trees) is the accuracy model. Both serve different purposes.
+
+
+Q: Can logistic regression handle multiclass problems?
+
+A: Yes, two ways:
+
+   One-vs-Rest (OvR): train one binary classifier per class — "is this class A
+   or not?" for each class. At prediction time, pick the class whose classifier
+   is most confident. Simple, works well in practice.
+
+   Multinomial (Softmax): train all classes simultaneously, output a probability
+   distribution across all classes that sums to 1. More theoretically correct
+   but slower to train.
+
+   In sklearn: set multi_class='ovr' or multi_class='multinomial'.
+   The solver must support multinomial (saga and lbfgs do; liblinear does not).
+
+
+Q: Why did you choose saga as the solver instead of lbfgs?
+
+A: At 12 million rows, lbfgs struggles — it computes the full Hessian matrix
+   (second-order derivatives) which becomes extremely expensive at large n.
+
+   Saga is a stochastic gradient descent variant. It processes mini-batches
+   rather than the full dataset each iteration, which makes it much faster
+   at large scale. It also supports L1, L2, and no regularization — lbfgs
+   only supports L2 and none.
+
+   The tradeoff: saga requires more iterations to converge and is sensitive
+   to learning rate. That's why tol=1e-2 was used instead of the default
+   tol=1e-4 — tighter tolerance caused saga to hit max_iter without converging,
+   while looser tolerance converged cleanly in ~40 epochs and actually gave
+   better holdout AUC (early stopping acts as implicit regularization).
+
+
+Q: What is Platt scaling and why does your model need it?
+
+A: Platt scaling is a post-processing step that calibrates the raw probability
+   outputs of a classifier so they actually match real-world frequencies.
+
+   A well-calibrated model that says "80% confident" should be right about
+   80% of the time. Your model is overconfident in the 0.60-0.75 range at
+   the 1hr horizon — when it says 65%, the actual frequency is only 42-57%.
+   That means raw probabilities should not be shown directly to users.
+
+   Platt scaling fits a small logistic regression on top of the raw outputs
+   using held-out data. It essentially re-maps raw scores to calibrated
+   probabilities. It must be fit on data the model has never seen (not the
+   training set) to avoid overfitting the calibration itself.
+
+   This matters for the app: if you show a user "65% chance bikes available"
+   and they're only actually there 45% of the time, users will notice and
+   stop trusting the numbers.
+
+   Simple analogy: imagine a weather forecaster who says "70% chance of rain"
+   but you track their record and it actually rains only 50% of those times.
+   You don't fire the forecaster — their ranking of risky vs safe days is still
+   useful. You just apply a personal correction: "whenever they say 70%, I'll
+   treat it as 50%." Platt scaling does that mathematically. The underlying
+   model doesn't change — just the interpretation of its output.
+
+   The two parameters (a and b) printed during 2.09 are the slope and intercept
+   of that correction. A slope > 1 means the raw probabilities were too compressed
+   toward the middle and needed to be spread out.
+
+
+Q: Why didn't you use class_weight='balanced' to fix the 92/8 class imbalance?
+
+A: The tradeoff: resampling helps recall but breaks probability calibration.
+
+   What class_weight='balanced' does: it tells the model "pretend the world is
+   50/50" during training. The model pays more attention to empty stations and
+   catches more of them. Recall goes up.
+
+   The problem: the model now lives in a fake 50/50 world. When it outputs
+   "73% chance bikes are available," that number reflects the fake world, not
+   the real 92/8 world. The probability is wrong.
+
+   For a binary yes/no output this doesn't matter — you only care which class
+   wins. But this app shows users the actual probability ("78% chance"). If that
+   number is wrong, users can't trust it. One bad trip and they delete the app.
+
+   The decision: don't resample. Keep the probabilities meaningful. Fix any
+   remaining calibration issues with Platt scaling afterward.
+
+   Interview one-liner: "Resampling trades probability calibration for recall.
+   Since the app surfaces raw probabilities to users, calibration was non-
+   negotiable — so no resampling, then Platt scaling to clean up the rest."
+
+
+============================================================
+FRAUD DETECTION VS CITIBIKE — INTERVIEW COMPARISON
+============================================================
+
+Q: How would you handle class imbalance differently in a fraud detection model?
+
+A: Almost every decision flips. Here's why:
+
+   IMBALANCE SEVERITY
+   Citibike: 92% positive (mild). Fraud: 99.9% legitimate (severe).
+   At 99.9/0.1, logistic regression almost never sees a fraud example.
+   Simple resampling isn't enough — you need SMOTE or aggressive undersampling.
+
+   COSTLY ERROR
+   Citibike: false positive is costly. App says "bikes available," station is
+   empty. User loses trust, deletes app.
+   Fraud: false negative is costly. Model says "legitimate," transaction is
+   fraud. Money is gone, customer is harmed, possible regulatory action.
+   The costly error flips completely.
+
+   RESAMPLING DECISION
+   Citibike: no resampling. Probabilities matter more than recall.
+   Fraud: use class_weight='balanced' or SMOTE. You want the model aggressively
+   biased toward catching fraud. Broken probability numbers don't matter if
+   you're making a binary flag/don't-flag decision.
+
+   THRESHOLD
+   Citibike: 0.5 or higher. Prioritize precision, minimize false promises.
+   Fraud: 0.1 or lower. Catch anything with even a 10% chance of fraud.
+   The precision hit (more false alarms) is acceptable — analysts review
+   flagged transactions before the customer is affected.
+
+   HUMAN REVIEW LAYER
+   This is the biggest structural difference. In fraud there's a human queue
+   between the model and the final decision. Analysts review flagged transactions.
+   The model's false positives get caught before reaching the customer.
+   In Citibike the model talks directly to users — no safety net.
+
+   Because of this, fraud thresholds are set by analyst capacity, not statistics:
+   "Our team can review 500 transactions per day, so set the threshold so roughly
+   500 land in the queue." The model ranks risk; the business decides how far
+   down that ranking to go.
+
+   TIERED THRESHOLDS (how real fraud systems work)
+   Probability > 0.9  -> auto-block (don't let the transaction through)
+   Probability 0.5-0.9 -> flag for human review
+   Probability 0.2-0.5 -> allow but monitor
+   Probability < 0.2  -> allow normally
+
+   INTERVIEW ONE-LINER
+   "In Citibike, false positives were the costly error so I prioritized precision
+   and avoided resampling because calibrated probabilities were what the app
+   served to users. In fraud detection the costly error flips — a missed fraud
+   is catastrophic — so I'd use class_weight='balanced' or SMOTE, set a low
+   threshold to maximize recall, and accept more false alarms. The resampling
+   decision always follows the cost asymmetry of the specific problem."
+
+
+Q: In fraud detection, why does lowering the threshold improve recall?
+
+A: First, get the class labels right — they flip from Citibike:
+
+                    Citibike            Fraud
+   Positive (1)     bikes available     fraud
+   Negative (0)     station empty       legitimate transaction
+   True Positive    correctly said      correctly caught fraud
+                    "bikes there"
+   False Positive   said "bikes,"       flagged legitimate as fraud
+                    station was empty
+   False Negative   said "empty,"       missed real fraud
+                    bikes were there
+
+   Lowering the threshold means: "flag anything with even a small chance of
+   being fraud." More transactions cross the line. You catch more real fraud
+   (TP goes up, FN goes down). Since recall = TP / (TP + FN), recall improves.
+
+   The cost: more false positives — legitimate transactions flagged as fraud,
+   which annoys customers. But the human review queue absorbs those before
+   the customer is affected. That buffer doesn't exist in Citibike.
+
+   ONE SENTENCE SUMMARY
+   Fraud:   lower threshold -> catch more fraud -> high recall, accept false alarms
+   Citibike: raise threshold -> fewer false promises -> high precision, accept
+             missing some empty stations
+
+   The threshold direction always follows the costly error:
+   - Costly error is FN (missed fraud)  -> lower threshold, maximize recall
+   - Costly error is FP (false promise) -> raise threshold, maximize precision
