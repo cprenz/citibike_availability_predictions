@@ -1,0 +1,22 @@
+CREATE TABLE IF NOT EXISTS station_daily_ridership (
+    station_id              VARCHAR(50)      NOT NULL,
+    date                    DATE             NOT NULL,
+    station_name            TEXT,
+    borough                 TEXT,
+    lat                     NUMERIC(10,7),
+    lon                     NUMERIC(10,7),
+    capacity                INTEGER,
+    total_departures        INTEGER,
+    total_arrivals          INTEGER,
+    net_flow                INTEGER,
+    ebike_departures        INTEGER,
+    classic_departures      INTEGER,
+    ebike_pct               NUMERIC(5,1),
+    classic_pct             NUMERIC(5,1),
+    member_trips            INTEGER,
+    casual_trips            INTEGER,
+    member_pct              NUMERIC(5,1),
+    casual_pct              NUMERIC(5,1),
+    avg_hourly_departures   NUMERIC(8,2),
+    PRIMARY KEY (station_id, date)
+);

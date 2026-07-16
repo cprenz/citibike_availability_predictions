@@ -1,0 +1,21 @@
+CREATE TABLE IF NOT EXISTS station_daily_status (
+    station_id              VARCHAR(50)     NOT NULL,
+    date                    DATE            NOT NULL,
+    station_name            TEXT,
+    borough                 TEXT,
+    lat                     NUMERIC(10,7),
+    lon                     NUMERIC(10,7),
+    capacity                INTEGER,
+    avg_bikes_available     NUMERIC(8,2),
+    min_bikes_available     INTEGER,
+    max_bikes_available     INTEGER,
+    avg_ebikes_available    NUMERIC(8,2),
+    avg_classic_available   NUMERIC(8,2),
+    avg_docks_available     NUMERIC(8,2),
+    avg_bikes_disabled      NUMERIC(8,2),
+    avg_fill_ratio          NUMERIC(6,4),
+    min_fill_ratio          NUMERIC(6,4),
+    max_fill_ratio          NUMERIC(6,4),
+    hours_sampled           INTEGER,
+    PRIMARY KEY (station_id, date)
+);
