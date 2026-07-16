@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import snowflake from "snowflake-sdk";
 import fs from "fs";
 import path from "path";
+import { createPrivateKey } from "crypto";
 
 const VALID_HORIZONS = new Set([60, 180, 360, 720, 1440, 2880]);
 
@@ -17,17 +18,20 @@ function isValidEmail(value: string): boolean {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value);
 }
 
-function getPrivateKey(): string {
+function getPrivateKey() {
+  let pem: string;
   if (process.env.SNOWFLAKE_PRIVATE_KEY) {
-    return process.env.SNOWFLAKE_PRIVATE_KEY.replace(/\\n/g, "\n");
+    pem = process.env.SNOWFLAKE_PRIVATE_KEY.replace(/\\n/g, "\n");
+  } else {
+    const keyPath = path.resolve(
+      process.cwd(),
+      "..",
+      "data_ingestion",
+      "snowflake_key.p8"
+    );
+    pem = fs.readFileSync(keyPath, "utf8");
   }
-  const keyPath = path.resolve(
-    process.cwd(),
-    "..",
-    "data_ingestion",
-    "snowflake_key.p8"
-  );
-  return fs.readFileSync(keyPath, "utf8");
+  return createPrivateKey({ key: pem, format: "pem" });
 }
 
 function executeSnowflake(sql: string, binds: unknown[]): Promise<void> {

@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import snowflake from "snowflake-sdk";
 import fs from "fs";
 import path from "path";
+import { createPrivateKey } from "crypto";
 
 // Snowflake returns column names uppercase when tables were created without
 // quoted identifiers (which write_pandas uses by default).
@@ -42,19 +43,24 @@ const SQL = `
   ORDER BY si.station_id, mp.horizon_minutes
 `;
 
-function getPrivateKey(): string {
-  // Vercel: PEM stored in env var (newlines may arrive as literal \n)
+function getPrivateKey() {
+  let pem: string;
+  // Vercel: PEM stored in env var (newlines may arrive as literal \n or real \n)
   if (process.env.SNOWFLAKE_PRIVATE_KEY) {
-    return process.env.SNOWFLAKE_PRIVATE_KEY.replace(/\\n/g, "\n");
+    pem = process.env.SNOWFLAKE_PRIVATE_KEY.replace(/\\n/g, "\n");
+  } else {
+    // Local: read from the .p8 file sitting two levels up from web_app/
+    const keyPath = path.resolve(
+      process.cwd(),
+      "..",
+      "data_ingestion",
+      "snowflake_key.p8"
+    );
+    pem = fs.readFileSync(keyPath, "utf8");
   }
-  // Local: read from the .p8 file sitting two levels up from web_app/
-  const keyPath = path.resolve(
-    process.cwd(),
-    "..",
-    "data_ingestion",
-    "snowflake_key.p8"
-  );
-  return fs.readFileSync(keyPath, "utf8");
+  // Parse through Node crypto to normalize PEM formatting before handing to
+  // Snowflake SDK — handles any whitespace/line-ending quirks from Vercel env vars.
+  return createPrivateKey({ key: pem, format: "pem" });
 }
 
 function querySnowflake(sql: string): Promise<SnowflakeRow[]> {
