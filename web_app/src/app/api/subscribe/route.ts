@@ -10,12 +10,17 @@ type SubscribeBody = {
   email?: string | null;
   phone?: string | null;
   station_id?: string;
+  target_time?: string | null;
   horizons?: number[];
   threshold?: number | null;
 };
 
 function isValidEmail(value: string): boolean {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value);
+}
+
+function isValidTime(value: string): boolean {
+  return /^([01]\d|2[0-3]):([0-5]\d)$/.test(value);
 }
 
 function getPrivateKey(): string {
@@ -77,6 +82,7 @@ export async function POST(request: Request) {
   const email = body.email?.trim() || null;
   const phone = body.phone?.trim() || null;
   const stationId = body.station_id?.trim();
+  const targetTime = body.target_time?.trim() || null;
   const horizons = Array.isArray(body.horizons) ? body.horizons : [];
   const threshold =
     typeof body.threshold === "number" && Number.isFinite(body.threshold)
@@ -101,6 +107,12 @@ export async function POST(request: Request) {
       { status: 400 }
     );
   }
+  if (targetTime && !isValidTime(targetTime)) {
+    return NextResponse.json(
+      { error: "Target time must be in HH:MM format." },
+      { status: 400 }
+    );
+  }
   const cleanHorizons = horizons.filter((h) => VALID_HORIZONS.has(h));
   if (cleanHorizons.length === 0) {
     return NextResponse.json(
@@ -110,18 +122,19 @@ export async function POST(request: Request) {
   }
 
   // Build a single multi-row INSERT — avoids needing explicit transactions.
-  const placeholders = cleanHorizons.map(() => "(?, ?, ?, ?, ?)").join(", ");
+  const placeholders = cleanHorizons.map(() => "(?, ?, ?, ?, ?, ?)").join(", ");
   const binds = cleanHorizons.flatMap((h) => [
     email,
     phone,
     stationId,
+    targetTime,
     h,
     threshold,
   ]);
 
   try {
     await executeSnowflake(
-      `INSERT INTO subscribers (email, phone, station_id, horizon_minutes, threshold) VALUES ${placeholders}`,
+      `INSERT INTO subscribers (email, phone, station_id, target_time, horizon_minutes, threshold) VALUES ${placeholders}`,
       binds
     );
     return NextResponse.json({ ok: true, count: cleanHorizons.length });

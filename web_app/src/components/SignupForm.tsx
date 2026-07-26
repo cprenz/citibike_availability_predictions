@@ -3,15 +3,26 @@
 import { useEffect, useMemo, useState } from "react";
 
 const HORIZONS = [
-  { minutes: 60, label: "1 hour" },
-  { minutes: 180, label: "3 hours" },
-  { minutes: 360, label: "6 hours" },
-  { minutes: 720, label: "12 hours" },
-  { minutes: 1440, label: "24 hours" },
-  { minutes: 2880, label: "Multi-day" },
+  { minutes: 60, label: "1 hour before" },
+  { minutes: 180, label: "3 hours before" },
+  { minutes: 360, label: "6 hours before" },
+  { minutes: 720, label: "12 hours before" },
+  { minutes: 1440, label: "24 hours before" },
+  { minutes: 2880, label: "2 days before" },
 ];
 
 type StationOption = { station_id: string; station_name: string };
+
+function alertTimeLabel(targetTime: string, horizonMinutes: number): string {
+  const [h, m] = targetTime.split(":").map(Number);
+  const totalMinutes = h * 60 + m - horizonMinutes;
+  const wrapped = ((totalMinutes % 1440) + 1440) % 1440;
+  const alertH = Math.floor(wrapped / 60);
+  const alertM = wrapped % 60;
+  const period = alertH >= 12 ? "PM" : "AM";
+  const display = alertH % 12 === 0 ? 12 : alertH % 12;
+  return `alert at ${display}:${alertM.toString().padStart(2, "0")} ${period}`;
+}
 
 export default function SignupForm({
   initialStationId,
@@ -24,32 +35,25 @@ export default function SignupForm({
   const [email, setEmail] = useState("");
   const [phone, setPhone] = useState("");
   const [stationId, setStationId] = useState(initialStationId);
+  const [targetTime, setTargetTime] = useState("");
   const [horizons, setHorizons] = useState<number[]>([60, 180]);
   const [threshold, setThreshold] = useState(1);
 
   const [status, setStatus] = useState<"idle" | "submitting" | "done">("idle");
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
-  // Load the station list so the picker shows names, not raw UUIDs.
   useEffect(() => {
     fetch("/api/stations")
       .then((r) => {
         if (!r.ok) throw new Error(`API ${r.status}`);
         return r.json();
       })
-      .then(
-        (
-          data: { station_id: string; station_name: string }[]
-        ) => {
-          const opts = data
-            .map((s) => ({
-              station_id: s.station_id,
-              station_name: s.station_name,
-            }))
-            .sort((a, b) => a.station_name.localeCompare(b.station_name));
-          setStations(opts);
-        }
-      )
+      .then((data: { station_id: string; station_name: string }[]) => {
+        const opts = data
+          .map((s) => ({ station_id: s.station_id, station_name: s.station_name }))
+          .sort((a, b) => a.station_name.localeCompare(b.station_name));
+        setStations(opts);
+      })
       .catch(() => setStationsError(true));
   }, []);
 
@@ -60,9 +64,7 @@ export default function SignupForm({
 
   function toggleHorizon(minutes: number) {
     setHorizons((prev) =>
-      prev.includes(minutes)
-        ? prev.filter((m) => m !== minutes)
-        : [...prev, minutes]
+      prev.includes(minutes) ? prev.filter((m) => m !== minutes) : [...prev, minutes]
     );
   }
 
@@ -79,7 +81,7 @@ export default function SignupForm({
       return;
     }
     if (horizons.length === 0) {
-      setErrorMsg("Pick at least one alert horizon.");
+      setErrorMsg("Pick at least one alert timing.");
       return;
     }
 
@@ -92,6 +94,7 @@ export default function SignupForm({
           email: email.trim() || null,
           phone: phone.trim() || null,
           station_id: stationId,
+          target_time: targetTime || null,
           horizons,
           threshold,
         }),
@@ -112,12 +115,12 @@ export default function SignupForm({
   if (status === "done") {
     return (
       <div className="w-full max-w-md rounded-xl border border-black/10 p-8 text-center dark:border-white/15">
-        <div className="mb-2 text-2xl">✓</div>
+        <div className="mb-2 text-2xl">&#10003;</div>
         <h2 className="mb-2 text-xl font-semibold">You&apos;re signed up</h2>
         <p className="text-sm text-zinc-600 dark:text-zinc-400">
           We&apos;ll alert you about bike availability
-          {selectedStationName ? ` at ${selectedStationName}` : ""} at your
-          selected horizons.
+          {selectedStationName ? ` at ${selectedStationName}` : ""}
+          {targetTime ? ` around ${targetTime}` : ""}.
         </p>
         <a
           href="/"
@@ -134,6 +137,7 @@ export default function SignupForm({
       onSubmit={handleSubmit}
       className="w-full max-w-md space-y-6 rounded-xl border border-black/10 p-8 dark:border-white/15"
     >
+      {/* Contact */}
       <div>
         <label className="mb-1 block text-sm font-medium" htmlFor="email">
           Email <span className="text-zinc-500">(optional)</span>
@@ -165,6 +169,7 @@ export default function SignupForm({
         </p>
       </div>
 
+      {/* Station */}
       <div>
         <label className="mb-1 block text-sm font-medium" htmlFor="station">
           Station
@@ -186,7 +191,7 @@ export default function SignupForm({
             className="w-full rounded-lg border border-black/15 bg-transparent px-3 py-2 text-sm outline-none focus:border-blue-500 dark:border-white/20"
           >
             <option value="">
-              {stations.length === 0 ? "Loading stations…" : "Select a station"}
+              {stations.length === 0 ? "Loading stations..." : "Select a station"}
             </option>
             {stations.map((s) => (
               <option key={s.station_id} value={s.station_id}>
@@ -197,26 +202,57 @@ export default function SignupForm({
         )}
       </div>
 
+      {/* Target time */}
       <div>
-        <span className="mb-2 block text-sm font-medium">Alert me for</span>
+        <label className="mb-1 block text-sm font-medium" htmlFor="target-time">
+          When do you need a bike?{" "}
+          <span className="text-zinc-500">(optional)</span>
+        </label>
+        <input
+          id="target-time"
+          type="time"
+          value={targetTime}
+          onChange={(e) => setTargetTime(e.target.value)}
+          className="w-full rounded-lg border border-black/15 bg-transparent px-3 py-2 text-sm outline-none focus:border-blue-500 dark:border-white/20"
+        />
+        {targetTime && (
+          <p className="mt-1 text-xs text-zinc-500">
+            We&apos;ll alert you before {targetTime} based on the lead times you choose below.
+          </p>
+        )}
+      </div>
+
+      {/* Horizons */}
+      <div>
+        <span className="mb-2 block text-sm font-medium">
+          {targetTime ? "Alert me this far in advance" : "Alert me for"}
+        </span>
         <div className="grid grid-cols-2 gap-2">
           {HORIZONS.map((h) => (
             <label
               key={h.minutes}
-              className="flex items-center gap-2 rounded-lg border border-black/10 px-3 py-2 text-sm dark:border-white/15"
+              className="flex flex-col gap-0.5 rounded-lg border border-black/10 px-3 py-2 text-sm dark:border-white/15 cursor-pointer"
             >
-              <input
-                type="checkbox"
-                checked={horizons.includes(h.minutes)}
-                onChange={() => toggleHorizon(h.minutes)}
-                className="accent-blue-600"
-              />
-              {h.label}
+              <div className="flex items-center gap-2">
+                <input
+                  type="checkbox"
+                  checked={horizons.includes(h.minutes)}
+                  onChange={() => toggleHorizon(h.minutes)}
+                  className="accent-blue-600"
+                />
+                <span>{h.label}</span>
+              </div>
+              {targetTime && (
+                <span className="pl-5 text-xs text-zinc-400">
+                  {alertTimeLabel(targetTime, h.minutes)}
+                </span>
+              )}
             </label>
           ))}
         </div>
       </div>
 
+      {/* Threshold */}
       <div>
         <label className="mb-1 block text-sm font-medium" htmlFor="threshold">
           Alert when predicted bikes available is at least
@@ -244,7 +280,7 @@ export default function SignupForm({
         disabled={status === "submitting"}
         className="w-full rounded-lg bg-blue-600 px-4 py-2.5 text-sm font-semibold text-white hover:bg-blue-700 disabled:opacity-60"
       >
-        {status === "submitting" ? "Signing up…" : "Get alerts"}
+        {status === "submitting" ? "Signing up..." : "Get alerts"}
       </button>
     </form>
   );
