@@ -60,6 +60,24 @@ function buildGeoJSON(
   };
 }
 
+function buildTimeSlotOptions(): string {
+  const opts: string[] = ['<option value="">When do you want the alert?</option>'];
+  for (let h = 0; h < 24; h++) {
+    for (let m = 0; m < 60; m += 30) {
+      const value = `${h.toString().padStart(2, "0")}:${m.toString().padStart(2, "0")}`;
+      const period = h >= 12 ? "PM" : "AM";
+      const displayH = h % 12 === 0 ? 12 : h % 12;
+      const label = `${displayH}:${m.toString().padStart(2, "0")} ${period}`;
+      opts.push(`<option value="${value}">${label}</option>`);
+    }
+  }
+  return opts.join("");
+}
+
+const INPUT_STYLE =
+  "width:100%;box-sizing:border-box;padding:7px 9px;border:1px solid #d1d5db;" +
+  "border-radius:6px;font-size:12px;margin-bottom:6px;outline:none;color:#111;background:#fff;font-family:system-ui,sans-serif";
+
 function buildPopupHTML(stationId: string, name: string, capacity: number, horizons: HorizonData[]): string {
   const rows = HORIZONS.map((h) => {
     const hz = horizons.find((x) => x.horizon_minutes === h.minutes);
@@ -67,7 +85,7 @@ function buildPopupHTML(stationId: string, name: string, capacity: number, horiz
     const bikes = hz != null ? Math.round(hz.predicted_value_lgbm) : "--";
     const color = hz != null ? probColor(hz.predicted_prob_logistic) : "#666";
     return `<tr>
-      <td style="padding:3px 8px;color:#333">${h.label}</td>
+      <td style="padding:3px 8px;color:#444">${h.label}</td>
       <td style="padding:3px 8px;text-align:right;color:#111;font-weight:600">${bikes}</td>
       <td style="padding:3px 8px;text-align:right;color:${color};font-weight:600">${prob}</td>
     </tr>`;
@@ -78,19 +96,33 @@ function buildPopupHTML(stationId: string, name: string, capacity: number, horiz
       <div style="font-weight:700;font-size:13px;margin-bottom:3px;color:#000">${name}</div>
       <div style="font-size:11px;color:#666;margin-bottom:10px">Capacity: ${capacity} docks</div>
       <table style="width:100%;font-size:12px;border-collapse:collapse">
-        <tr style="font-size:11px;color:#555">
+        <tr style="font-size:11px;color:#666">
           <th style="text-align:left;padding:3px 8px">Horizon</th>
           <th style="text-align:right;padding:3px 8px">Bikes</th>
           <th style="text-align:right;padding:3px 8px">Prob.</th>
         </tr>
         ${rows}
       </table>
-      <a href="/signup?station_id=${encodeURIComponent(stationId)}"
-        style="display:block;margin-top:12px;padding:9px 8px;background:#2563eb;color:#fff;
-               border-radius:6px;font-size:12px;font-weight:600;text-align:center;
-               text-decoration:none">
-        Set up alerts for this station &rarr;
-      </a>
+      <div class="popup-form-wrap" style="margin-top:12px;border-top:1px solid #e5e7eb;padding-top:10px">
+        <div style="font-size:11px;font-weight:700;color:#374151;margin-bottom:8px;letter-spacing:0.02em">
+          GET ALERTS FOR THIS STATION
+        </div>
+        <input class="popup-email" type="email" placeholder="Email"
+          style="${INPUT_STYLE}" autocomplete="email" />
+        <input class="popup-phone" type="tel" placeholder="Text (optional)"
+          style="${INPUT_STYLE}" autocomplete="tel" />
+        <select class="popup-time"
+          style="${INPUT_STYLE}margin-bottom:8px;cursor:pointer">
+          ${buildTimeSlotOptions()}
+        </select>
+        <button class="popup-submit"
+          style="width:100%;padding:9px;background:#2563eb;color:#fff;border:none;
+                 border-radius:6px;font-size:12px;font-weight:600;cursor:pointer;
+                 font-family:system-ui,sans-serif">
+          Get alerts
+        </button>
+        <div class="popup-msg" style="font-size:11px;margin-top:6px;text-align:center;min-height:16px"></div>
+      </div>
     </div>
   `;
 }
@@ -106,14 +138,11 @@ export default function Map() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  // The map init effect runs once, so its handlers would capture a stale
-  // selectedHorizon. Mirror it in a ref the hover/subscribe handler can read live.
   const selectedHorizonRef = useRef(selectedHorizon);
   useEffect(() => {
     selectedHorizonRef.current = selectedHorizon;
   }, [selectedHorizon]);
 
-  // Fetch station predictions
   useEffect(() => {
     fetch("/api/stations")
       .then((r) => {
@@ -130,7 +159,6 @@ export default function Map() {
       });
   }, []);
 
-  // Initialize map once
   useEffect(() => {
     if (!containerRef.current || mapRef.current) return;
 
@@ -173,8 +201,6 @@ export default function Map() {
         },
       });
 
-      // Hover UX: open a popup on mouseenter. A short timer keeps it alive
-      // while the user moves the pointer from the dot onto the popup.
       let closeTimer: number | null = null;
 
       const closePopup = () => {
@@ -189,7 +215,13 @@ export default function Map() {
       };
       const scheduleClose = () => {
         cancelClose();
-        closeTimer = window.setTimeout(closePopup, 300);
+        closeTimer = window.setTimeout(() => {
+          // Don't close while the user is typing in the popup form
+          const active = document.activeElement;
+          const popupEl = popupRef.current?.getElement();
+          if (popupEl && active && popupEl.contains(active)) return;
+          closePopup();
+        }, 300);
       };
 
       const showPopup = (feat: mapboxgl.MapGeoJSONFeature) => {
@@ -208,7 +240,7 @@ export default function Map() {
           closeButton: true,
           closeOnClick: false,
           focusAfterOpen: false,
-          maxWidth: "280px",
+          maxWidth: "290px",
         });
         popupRef.current = popup;
         popup
@@ -223,6 +255,60 @@ export default function Map() {
         const el = popup.getElement();
         el.addEventListener("mouseenter", cancelClose);
         el.addEventListener("mouseleave", scheduleClose);
+
+        // Wire up the inline alert form
+        const emailEl = el.querySelector(".popup-email") as HTMLInputElement | null;
+        const phoneEl = el.querySelector(".popup-phone") as HTMLInputElement | null;
+        const timeEl = el.querySelector(".popup-time") as HTMLSelectElement | null;
+        const submitBtn = el.querySelector(".popup-submit") as HTMLButtonElement | null;
+        const msgEl = el.querySelector(".popup-msg") as HTMLDivElement | null;
+        const formWrap = el.querySelector(".popup-form-wrap") as HTMLDivElement | null;
+
+        submitBtn?.addEventListener("click", async () => {
+          const email = emailEl?.value.trim() ?? "";
+          const phone = phoneEl?.value.trim() ?? "";
+          const targetTime = timeEl?.value ?? "";
+
+          if (!email && !phone) {
+            if (msgEl) { msgEl.style.color = "#dc2626"; msgEl.textContent = "Enter an email or phone number."; }
+            return;
+          }
+
+          if (submitBtn) { submitBtn.textContent = "Signing up..."; submitBtn.disabled = true; }
+          if (msgEl) msgEl.textContent = "";
+
+          try {
+            const res = await fetch("/api/subscribe", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                email: email || null,
+                phone: phone || null,
+                station_id: p.id,
+                target_time: targetTime || null,
+                horizons: [60, 180, 360, 720, 1440, 2880],
+                threshold: 1,
+              }),
+            });
+            const data = await res.json();
+            if (!res.ok) {
+              if (msgEl) { msgEl.style.color = "#dc2626"; msgEl.textContent = data.error ?? "Something went wrong."; }
+              if (submitBtn) { submitBtn.textContent = "Get alerts"; submitBtn.disabled = false; }
+            } else {
+              if (formWrap) {
+                formWrap.innerHTML = `
+                  <div style="text-align:center;padding:12px 0">
+                    <div style="font-size:20px;margin-bottom:4px">&#10003;</div>
+                    <div style="font-weight:700;color:#16a34a;font-size:13px">You're signed up!</div>
+                    <div style="font-size:11px;color:#555;margin-top:4px">We'll alert you about bike availability at this station.</div>
+                  </div>`;
+              }
+            }
+          } catch {
+            if (msgEl) { msgEl.style.color = "#dc2626"; msgEl.textContent = "Network error. Try again."; }
+            if (submitBtn) { submitBtn.textContent = "Get alerts"; submitBtn.disabled = false; }
+          }
+        });
       };
 
       map.on("mouseenter", "stations-circle", (e) => {
@@ -235,17 +321,12 @@ export default function Map() {
         scheduleClose();
       });
 
-      // Click anywhere that isn't a station dot dismisses the popup immediately,
-      // even if it was pinned open by focusing the form.
       map.on("click", (e) => {
-        const hits = map.queryRenderedFeatures(e.point, {
-          layers: ["stations-circle"],
-        });
+        const hits = map.queryRenderedFeatures(e.point, { layers: ["stations-circle"] });
         if (hits.length === 0) closePopup();
       });
 
       mapReadyRef.current = true;
-      // Dispatch a custom event so the data effect can re-run
       map.fire("map-ready" as Parameters<typeof map.fire>[0]);
     });
 
@@ -257,7 +338,6 @@ export default function Map() {
     };
   }, []);
 
-  // Update GeoJSON source whenever stations or horizon changes
   useEffect(() => {
     const apply = () => {
       if (!mapRef.current || stations.length === 0) return;

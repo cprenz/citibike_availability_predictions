@@ -2,15 +2,6 @@
 
 import { useEffect, useMemo, useState } from "react";
 
-const HORIZONS = [
-  { minutes: 60, label: "1 hour before" },
-  { minutes: 180, label: "3 hours before" },
-  { minutes: 360, label: "6 hours before" },
-  { minutes: 720, label: "12 hours before" },
-  { minutes: 1440, label: "24 hours before" },
-  { minutes: 2880, label: "2 days before" },
-];
-
 type TimeSlot = { value: string; label: string };
 
 function buildTargetTimeSlots(): TimeSlot[] {
@@ -31,22 +22,10 @@ const TARGET_TIME_SLOTS = buildTargetTimeSlots();
 
 type StationOption = { station_id: string; station_name: string };
 
-function alertTimeLabel(targetTime: string, horizonMinutes: number): string {
-  const [h, m] = targetTime.split(":").map(Number);
-  const totalMinutes = h * 60 + m - horizonMinutes;
-  const wrapped = ((totalMinutes % 1440) + 1440) % 1440;
-  const alertH = Math.floor(wrapped / 60);
-  const alertM = wrapped % 60;
-  const period = alertH >= 12 ? "PM" : "AM";
-  const display = alertH % 12 === 0 ? 12 : alertH % 12;
-  return `alert at ${display}:${alertM.toString().padStart(2, "0")} ${period}`;
-}
+const SELECT_CLASS =
+  "w-full rounded-lg border border-black/15 bg-white px-3 py-2 text-sm text-gray-900 outline-none focus:border-blue-500 dark:border-white/20 dark:bg-zinc-900 dark:text-white";
 
-export default function SignupForm({
-  initialStationId,
-}: {
-  initialStationId: string;
-}) {
+export default function SignupForm({ initialStationId }: { initialStationId: string }) {
   const [stations, setStations] = useState<StationOption[]>([]);
   const [stationsError, setStationsError] = useState(false);
 
@@ -54,8 +33,6 @@ export default function SignupForm({
   const [phone, setPhone] = useState("");
   const [stationId, setStationId] = useState(initialStationId);
   const [targetTime, setTargetTime] = useState("");
-  const [horizons, setHorizons] = useState<number[]>([60, 180]);
-  const [threshold, setThreshold] = useState(1);
 
   const [status, setStatus] = useState<"idle" | "submitting" | "done">("idle");
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
@@ -80,12 +57,6 @@ export default function SignupForm({
     [stations, stationId]
   );
 
-  function toggleHorizon(minutes: number) {
-    setHorizons((prev) =>
-      prev.includes(minutes) ? prev.filter((m) => m !== minutes) : [...prev, minutes]
-    );
-  }
-
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     setErrorMsg(null);
@@ -96,10 +67,6 @@ export default function SignupForm({
     }
     if (!stationId) {
       setErrorMsg("Choose a station.");
-      return;
-    }
-    if (horizons.length === 0) {
-      setErrorMsg("Pick at least one alert timing.");
       return;
     }
 
@@ -113,8 +80,8 @@ export default function SignupForm({
           phone: phone.trim() || null,
           station_id: stationId,
           target_time: targetTime || null,
-          horizons,
-          threshold,
+          horizons: [60, 180, 360, 720, 1440, 2880],
+          threshold: 1,
         }),
       });
       const data = await res.json();
@@ -138,7 +105,10 @@ export default function SignupForm({
         <p className="text-sm text-zinc-600 dark:text-zinc-400">
           We&apos;ll alert you about bike availability
           {selectedStationName ? ` at ${selectedStationName}` : ""}
-          {targetTime ? ` around ${targetTime}` : ""}.
+          {targetTime
+            ? ` around ${TARGET_TIME_SLOTS.find((s) => s.value === targetTime)?.label}`
+            : ""}
+          .
         </p>
         <a
           href="/"
@@ -206,7 +176,7 @@ export default function SignupForm({
             id="station"
             value={stationId}
             onChange={(e) => setStationId(e.target.value)}
-            className="w-full rounded-lg border border-black/15 bg-transparent px-3 py-2 text-sm outline-none focus:border-blue-500 dark:border-white/20"
+            className={SELECT_CLASS}
           >
             <option value="">
               {stations.length === 0 ? "Loading stations..." : "Select a station"}
@@ -220,17 +190,17 @@ export default function SignupForm({
         )}
       </div>
 
-      {/* Target time */}
+      {/* Alert time */}
       <div>
         <label className="mb-1 block text-sm font-medium" htmlFor="target-time">
-          When do you need to be at the station?{" "}
+          When do you want the station alert?{" "}
           <span className="text-zinc-500">(optional)</span>
         </label>
         <select
           id="target-time"
           value={targetTime}
           onChange={(e) => setTargetTime(e.target.value)}
-          className="w-full rounded-lg border border-black/15 bg-transparent px-3 py-2 text-sm outline-none focus:border-blue-500 dark:border-white/20"
+          className={SELECT_CLASS}
         >
           <option value="">Select a time</option>
           {TARGET_TIME_SLOTS.map((slot) => (
@@ -239,58 +209,6 @@ export default function SignupForm({
             </option>
           ))}
         </select>
-        {targetTime && (
-          <p className="mt-1 text-xs text-zinc-500">
-            We&apos;ll alert you before {TARGET_TIME_SLOTS.find((s) => s.value === targetTime)?.label} based on the lead times you choose below.
-          </p>
-        )}
-      </div>
-
-      {/* Horizons */}
-      <div>
-        <span className="mb-2 block text-sm font-medium">
-          {targetTime ? "Alert me this far in advance" : "Alert me for"}
-        </span>
-        <div className="grid grid-cols-2 gap-2">
-          {HORIZONS.map((h) => (
-            <label
-              key={h.minutes}
-              className="flex flex-col gap-0.5 rounded-lg border border-black/10 px-3 py-2 text-sm dark:border-white/15 cursor-pointer"
-            >
-              <div className="flex items-center gap-2">
-                <input
-                  type="checkbox"
-                  checked={horizons.includes(h.minutes)}
-                  onChange={() => toggleHorizon(h.minutes)}
-                  className="accent-blue-600"
-                />
-                <span>{h.label}</span>
-              </div>
-              {targetTime && (
-                <span className="pl-5 text-xs text-zinc-400">
-                  {alertTimeLabel(targetTime, h.minutes)}
-                </span>
-              )}
-            </label>
-          ))}
-        </div>
-      </div>
-
-      {/* Threshold */}
-      <div>
-        <label className="mb-1 block text-sm font-medium" htmlFor="threshold">
-          Alert when predicted bikes available is at least
-        </label>
-        <input
-          id="threshold"
-          type="number"
-          min={1}
-          value={threshold}
-          onChange={(e) =>
-            setThreshold(Math.max(1, parseInt(e.target.value) || 1))
-          }
-          className="w-24 rounded-lg border border-black/15 bg-transparent px-3 py-2 text-sm outline-none focus:border-blue-500 dark:border-white/20"
-        />
       </div>
 
       {errorMsg && (
