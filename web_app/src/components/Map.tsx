@@ -60,7 +60,7 @@ function buildGeoJSON(
   };
 }
 
-function buildPopupHTML(name: string, capacity: number, horizons: HorizonData[]): string {
+function buildPopupHTML(stationId: string, name: string, capacity: number, horizons: HorizonData[]): string {
   const rows = HORIZONS.map((h) => {
     const hz = horizons.find((x) => x.horizon_minutes === h.minutes);
     const prob = hz != null ? `${Math.round(hz.predicted_prob_logistic * 100)}%` : "--";
@@ -85,16 +85,12 @@ function buildPopupHTML(name: string, capacity: number, horizons: HorizonData[])
         </tr>
         ${rows}
       </table>
-      <form data-signup style="margin-top:12px;display:flex;flex-direction:column;gap:6px">
-        <input type="email" name="email" placeholder="you@email.com" required
-          style="padding:7px 8px;border:1px solid #ccc;border-radius:6px;font-size:12px;color:#111" />
-        <button type="submit"
-          style="padding:8px;background:#2563eb;color:#fff;border:none;border-radius:6px;
-                 font-size:12px;font-weight:600;cursor:pointer">
-          Get alerts for this station
-        </button>
-        <div data-status style="font-size:11px;text-align:center;min-height:14px"></div>
-      </form>
+      <a href="/signup?station_id=${encodeURIComponent(stationId)}"
+        style="display:block;margin-top:12px;padding:9px 8px;background:#2563eb;color:#fff;
+               border-radius:6px;font-size:12px;font-weight:600;text-align:center;
+               text-decoration:none">
+        Set up alerts for this station &rarr;
+      </a>
     </div>
   `;
 }
@@ -177,17 +173,13 @@ export default function Map() {
         },
       });
 
-      // Hover UX: open a popup on mouseenter. Because the popup also holds an
-      // interactive signup form, we can't close it the instant the pointer
-      // leaves the dot — a short timer keeps it alive while the user moves onto
-      // the popup, and focusing the email field "pins" it open entirely.
+      // Hover UX: open a popup on mouseenter. A short timer keeps it alive
+      // while the user moves the pointer from the dot onto the popup.
       let closeTimer: number | null = null;
-      let pinned = false;
 
       const closePopup = () => {
         popupRef.current?.remove();
         popupRef.current = null;
-        pinned = false;
       };
       const cancelClose = () => {
         if (closeTimer !== null) {
@@ -196,7 +188,6 @@ export default function Map() {
         }
       };
       const scheduleClose = () => {
-        if (pinned) return;
         cancelClose();
         closeTimer = window.setTimeout(closePopup, 300);
       };
@@ -222,54 +213,16 @@ export default function Map() {
         popupRef.current = popup;
         popup
           .setLngLat(coords)
-          .setHTML(buildPopupHTML(p.name, p.capacity, horizons))
+          .setHTML(buildPopupHTML(p.id, p.name, p.capacity, horizons))
           .addTo(map);
+
+        popup.on("close", () => {
+          if (popupRef.current === popup) popupRef.current = null;
+        });
 
         const el = popup.getElement();
         el.addEventListener("mouseenter", cancelClose);
         el.addEventListener("mouseleave", scheduleClose);
-
-        const form = el.querySelector("form[data-signup]") as HTMLFormElement | null;
-        if (!form) return;
-        const statusEl = form.querySelector("[data-status]") as HTMLElement;
-        const emailEl = form.querySelector('input[name="email"]') as HTMLInputElement;
-        const buttonEl = form.querySelector("button") as HTMLButtonElement;
-
-        // Keep the popup open the whole time the user is filling out the form.
-        form.addEventListener("focusin", () => {
-          pinned = true;
-          cancelClose();
-        });
-
-        form.addEventListener("submit", async (ev) => {
-          ev.preventDefault();
-          const email = emailEl.value.trim();
-          if (!email) return;
-          statusEl.textContent = "Signing up...";
-          statusEl.style.color = "#666";
-          try {
-            const res = await fetch("/api/subscribe", {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({
-                email,
-                station_id: p.id,
-                horizons: [selectedHorizonRef.current],
-                threshold: 1,
-              }),
-            });
-            const data = await res.json();
-            if (!res.ok) throw new Error(data.error ?? "Signup failed");
-            statusEl.textContent = "You're signed up!";
-            statusEl.style.color = "#16a34a";
-            emailEl.disabled = true;
-            buttonEl.disabled = true;
-          } catch (err) {
-            statusEl.textContent =
-              err instanceof Error ? err.message : "Signup failed";
-            statusEl.style.color = "#dc2626";
-          }
-        });
       };
 
       map.on("mouseenter", "stations-circle", (e) => {
@@ -280,6 +233,15 @@ export default function Map() {
       map.on("mouseleave", "stations-circle", () => {
         map.getCanvas().style.cursor = "";
         scheduleClose();
+      });
+
+      // Click anywhere that isn't a station dot dismisses the popup immediately,
+      // even if it was pinned open by focusing the form.
+      map.on("click", (e) => {
+        const hits = map.queryRenderedFeatures(e.point, {
+          layers: ["stations-circle"],
+        });
+        if (hits.length === 0) closePopup();
       });
 
       mapReadyRef.current = true;

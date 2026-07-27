@@ -11,6 +11,24 @@ const HORIZONS = [
   { minutes: 2880, label: "2 days before" },
 ];
 
+type TimeSlot = { value: string; label: string };
+
+function buildTargetTimeSlots(): TimeSlot[] {
+  const slots: TimeSlot[] = [];
+  for (let h = 0; h < 24; h++) {
+    for (let m = 0; m < 60; m += 30) {
+      const value = `${h.toString().padStart(2, "0")}:${m.toString().padStart(2, "0")}`;
+      const period = h >= 12 ? "PM" : "AM";
+      const displayH = h % 12 === 0 ? 12 : h % 12;
+      const label = `${displayH}:${m.toString().padStart(2, "0")} ${period}`;
+      slots.push({ value, label });
+    }
+  }
+  return slots;
+}
+
+const TARGET_TIME_SLOTS = buildTargetTimeSlots();
+
 type StationOption = { station_id: string; station_name: string };
 
 function alertTimeLabel(targetTime: string, horizonMinutes: number): string {
@@ -205,19 +223,25 @@ export default function SignupForm({
       {/* Target time */}
       <div>
         <label className="mb-1 block text-sm font-medium" htmlFor="target-time">
-          When do you need a bike?{" "}
+          When do you need to be at the station?{" "}
           <span className="text-zinc-500">(optional)</span>
         </label>
-        <input
+        <select
           id="target-time"
-          type="time"
           value={targetTime}
           onChange={(e) => setTargetTime(e.target.value)}
           className="w-full rounded-lg border border-black/15 bg-transparent px-3 py-2 text-sm outline-none focus:border-blue-500 dark:border-white/20"
-        />
+        >
+          <option value="">Select a time</option>
+          {TARGET_TIME_SLOTS.map((slot) => (
+            <option key={slot.value} value={slot.value}>
+              {slot.label}
+            </option>
+          ))}
+        </select>
         {targetTime && (
           <p className="mt-1 text-xs text-zinc-500">
-            We&apos;ll alert you before {targetTime} based on the lead times you choose below.
+            We&apos;ll alert you before {TARGET_TIME_SLOTS.find((s) => s.value === targetTime)?.label} based on the lead times you choose below.
           </p>
         )}
       </div>
