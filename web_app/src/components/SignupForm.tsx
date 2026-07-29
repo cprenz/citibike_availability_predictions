@@ -95,6 +95,10 @@ export default function SignupForm({ initialStationId }: { initialStationId: str
         return;
       }
       setStatus("done");
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (window as any).fbq?.("track", "Lead");
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (window as any).gtag?.("event", "signup_complete", { station_id: stationId });
     } catch {
       setErrorMsg("Network error. Try again.");
       setStatus("idle");

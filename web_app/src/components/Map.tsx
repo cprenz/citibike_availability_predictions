@@ -109,8 +109,6 @@ function buildPopupHTML(stationId: string, name: string, capacity: number, horiz
         </div>
         <input class="popup-email" type="email" placeholder="Email"
           style="${INPUT_STYLE}" autocomplete="email" />
-        <input class="popup-phone" type="tel" placeholder="Text (optional)"
-          style="${INPUT_STYLE}" autocomplete="tel" />
         <select class="popup-time"
           style="${INPUT_STYLE}margin-bottom:8px;cursor:pointer">
           ${buildTimeSlotOptions()}
@@ -234,6 +232,8 @@ export default function Map() {
         const horizons: HorizonData[] = JSON.parse(p.horizons);
         const coords = (feat.geometry as GeoJSON.Point).coordinates as [number, number];
 
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (window as any).gtag?.("event", "station_viewed", { station_id: p.id, station_name: p.name });
         cancelClose();
         popupRef.current?.remove();
         const popup = new mapboxgl.Popup({
@@ -258,7 +258,6 @@ export default function Map() {
 
         // Wire up the inline alert form
         const emailEl = el.querySelector(".popup-email") as HTMLInputElement | null;
-        const phoneEl = el.querySelector(".popup-phone") as HTMLInputElement | null;
         const timeEl = el.querySelector(".popup-time") as HTMLSelectElement | null;
         const submitBtn = el.querySelector(".popup-submit") as HTMLButtonElement | null;
         const msgEl = el.querySelector(".popup-msg") as HTMLDivElement | null;
@@ -266,11 +265,10 @@ export default function Map() {
 
         submitBtn?.addEventListener("click", async () => {
           const email = emailEl?.value.trim() ?? "";
-          const phone = phoneEl?.value.trim() ?? "";
           const targetTime = timeEl?.value ?? "";
 
-          if (!email && !phone) {
-            if (msgEl) { msgEl.style.color = "#dc2626"; msgEl.textContent = "Enter an email or phone number."; }
+          if (!email) {
+            if (msgEl) { msgEl.style.color = "#dc2626"; msgEl.textContent = "Enter your email address."; }
             return;
           }
 
@@ -283,7 +281,6 @@ export default function Map() {
               headers: { "Content-Type": "application/json" },
               body: JSON.stringify({
                 email: email || null,
-                phone: phone || null,
                 station_id: p.id,
                 target_time: targetTime || null,
                 horizons: [60, 180, 360, 720, 1440, 2880],
@@ -295,6 +292,10 @@ export default function Map() {
               if (msgEl) { msgEl.style.color = "#dc2626"; msgEl.textContent = data.error ?? "Something went wrong."; }
               if (submitBtn) { submitBtn.textContent = "Get alerts"; submitBtn.disabled = false; }
             } else {
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+              (window as any).fbq?.("track", "Lead");
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+              (window as any).gtag?.("event", "signup_complete", { station_id: p.id, station_name: p.name });
               if (formWrap) {
                 formWrap.innerHTML = `
                   <div style="text-align:center;padding:12px 0">
@@ -359,7 +360,11 @@ export default function Map() {
         {HORIZONS.map((h) => (
           <button
             key={h.minutes}
-            onClick={() => setSelectedHorizon(h.minutes)}
+            onClick={() => {
+                setSelectedHorizon(h.minutes);
+                // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                (window as any).gtag?.("event", "horizon_selected", { horizon: h.label });
+              }}
             className={`rounded px-3 py-1 text-xs font-medium transition-colors ${
               selectedHorizon === h.minutes
                 ? "bg-blue-600 text-white"
