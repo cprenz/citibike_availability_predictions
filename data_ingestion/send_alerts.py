@@ -190,7 +190,7 @@ def _build_email(alert: dict) -> dict:
     station = alert["station_name"]
     target_str = _fmt_time(alert["target_time"])
     station_url = f"{APP_URL}/station/{alert['station_id']}"
-    unsub_url = f"{APP_URL}/unsubscribe?id={alert['subscriber_id']}"
+    unsub_url = f"{APP_URL}/signup"
     prob_color = _prob_hex(alert["predicted_prob_logistic"])
 
     subject = (
@@ -266,9 +266,7 @@ def _send_email(alert: dict):
         "text": email["text"],
         "headers": {
             # Gmail shows a native unsubscribe button when this header is present
-            "List-Unsubscribe": (
-                f"<{APP_URL}/unsubscribe?id={alert['subscriber_id']}>"
-            ),
+            "List-Unsubscribe": f"<{APP_URL}/signup>",
         },
     })
 
