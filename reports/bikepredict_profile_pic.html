@@ -1,0 +1,188 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>BikePredict — Assets</title>
+  <style>
+    body { margin:0; padding:40px; background:#111; font-family:Arial,sans-serif; display:flex; flex-direction:column; align-items:center; gap:48px; }
+    .section { display:flex; flex-direction:column; align-items:center; gap:14px; }
+    h2 { color:#fff; margin:0; font-size:15px; font-weight:600; letter-spacing:.04em; text-transform:uppercase; }
+    button { padding:13px 32px; background:#2563eb; color:#fff; border:none; border-radius:8px; font-size:15px; font-weight:700; cursor:pointer; font-family:Arial,sans-serif; }
+    button:hover { background:#1d4ed8; }
+    .circle { border-radius:50%; overflow:hidden; display:block; }
+  </style>
+</head>
+<body>
+
+<div class="section">
+  <h2>Profile Picture — 1080 × 1080</h2>
+  <canvas id="pp" class="circle" style="width:300px;height:300px"></canvas>
+  <button onclick="dl('pp','bikepredict_profile_pic.png')">Download Profile Picture PNG</button>
+</div>
+
+<div class="section">
+  <h2>Cover Photo — 1080 × 1080</h2>
+  <canvas id="cp" style="width:540px;height:540px"></canvas>
+  <button onclick="dl('cp','bikepredict_cover_photo.png')">Download Cover Photo PNG</button>
+</div>
+
+<script>
+function dl(id, name) {
+  document.getElementById(id).toBlob(b => {
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(b);
+    a.download = name;
+    a.click();
+  }, 'image/png');
+}
+
+function rr(ctx, x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x+r, y);
+  ctx.arcTo(x+w, y, x+w, y+h, r);
+  ctx.arcTo(x+w, y+h, x, y+h, r);
+  ctx.arcTo(x, y+h, x, y, r);
+  ctx.arcTo(x, y, x+w, y, r);
+  ctx.closePath();
+}
+
+// ── Profile Picture ──────────────────────────────────────────────────────────
+(function() {
+  const c = document.getElementById('pp');
+  c.width = c.height = 1080;
+  const ctx = c.getContext('2d');
+  const s = 1.8; // 600-unit viewBox → 1080px
+
+  ctx.fillStyle = '#0d1b2a';
+  ctx.fillRect(0, 0, 1080, 1080);
+
+  // glow behind bubble
+  const g = ctx.createRadialGradient(300*s, 190*s, 0, 300*s, 190*s, 270*s);
+  g.addColorStop(0, 'rgba(192,221,151,.15)');
+  g.addColorStop(1, 'rgba(192,221,151,0)');
+  ctx.fillStyle = g;
+  ctx.beginPath(); ctx.arc(300*s, 190*s, 270*s, 0, Math.PI*2); ctx.fill();
+
+  // thought bubble
+  ctx.fillStyle = '#C0DD97';
+  ctx.beginPath(); ctx.arc(300*s, 190*s, 122*s, 0, Math.PI*2); ctx.fill();
+
+  // checkmark
+  ctx.strokeStyle = '#0d1b2a';
+  ctx.lineWidth = 28*s; ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+  ctx.beginPath();
+  ctx.moveTo(242*s, 192*s); ctx.lineTo(282*s, 236*s); ctx.lineTo(362*s, 144*s);
+  ctx.stroke();
+
+  // trailing dots
+  ctx.fillStyle = '#C0DD97';
+  ctx.globalAlpha = .9;  ctx.beginPath(); ctx.arc(258*s, 322*s, 12*s,  0, Math.PI*2); ctx.fill();
+  ctx.globalAlpha = .75; ctx.beginPath(); ctx.arc(246*s, 344*s, 7.5*s, 0, Math.PI*2); ctx.fill();
+  ctx.globalAlpha = 1;
+
+  // bike + rider — SVG was translate(190,363) scale(1.294) in 600-unit space
+  ctx.save();
+  ctx.translate(190*s, 363*s);
+  ctx.scale(1.294*s, 1.294*s);
+
+  ctx.strokeStyle = '#F2EFE6'; ctx.lineWidth = 3.5; ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+  ctx.beginPath(); ctx.arc(34, 122, 22, 0, Math.PI*2); ctx.stroke();
+  ctx.beginPath(); ctx.arc(128, 122, 22, 0, Math.PI*2); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(34,122); ctx.lineTo(62,96); ctx.lineTo(108,96); ctx.lineTo(128,122); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(34,122); ctx.lineTo(78,122); ctx.lineTo(108,96); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(62,96); ctx.lineTo(78,122); ctx.stroke();
+  ctx.fillStyle = '#F2EFE6'; ctx.beginPath(); ctx.arc(78, 122, 6, 0, Math.PI*2); ctx.fill();
+
+  ctx.strokeStyle = '#85B7EB'; ctx.lineWidth = 3.5;
+  ctx.beginPath(); ctx.moveTo(64,92);  ctx.lineTo(84,66);  ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(80,72);  ctx.lineTo(108,92); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(64,92);  ctx.lineTo(78,116); ctx.stroke();
+  ctx.fillStyle = '#85B7EB'; ctx.beginPath(); ctx.arc(90, 56, 13, 0, Math.PI*2); ctx.fill();
+
+  ctx.fillStyle = '#FAC775';
+  ctx.beginPath(); ctx.moveTo(77,52); ctx.bezierCurveTo(80,42,100,42,103,52); ctx.closePath(); ctx.fill();
+
+  ctx.restore();
+})();
+
+// ── Cover Photo ──────────────────────────────────────────────────────────────
+(function() {
+  const c = document.getElementById('cp');
+  c.width = c.height = 1080;
+  const ctx = c.getContext('2d');
+
+  ctx.fillStyle = '#0d1b2a';
+  ctx.fillRect(0, 0, 1080, 1080);
+
+  // subtle center-band highlight
+  const band = ctx.createLinearGradient(0, 320, 0, 760);
+  band.addColorStop(0,   'rgba(30,64,175,0)');
+  band.addColorStop(0.5, 'rgba(30,64,175,.07)');
+  band.addColorStop(1,   'rgba(30,64,175,0)');
+  ctx.fillStyle = band;
+  ctx.fillRect(0, 320, 1080, 440);
+
+  // ── LEFT: icon + wordmark ─────────────────
+  const ix = 104, iy = 480, ir = 40;
+
+  const ig = ctx.createRadialGradient(ix, iy, 0, ix, iy, 80);
+  ig.addColorStop(0, 'rgba(192,221,151,.2)');
+  ig.addColorStop(1, 'rgba(192,221,151,0)');
+  ctx.fillStyle = ig;
+  ctx.beginPath(); ctx.arc(ix, iy, 80, 0, Math.PI*2); ctx.fill();
+
+  ctx.fillStyle = '#C0DD97';
+  ctx.beginPath(); ctx.arc(ix, iy, ir, 0, Math.PI*2); ctx.fill();
+
+  ctx.strokeStyle = '#0d1b2a'; ctx.lineWidth = 9; ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+  ctx.beginPath(); ctx.moveTo(ix-18, iy+2); ctx.lineTo(ix-3, iy+17); ctx.lineTo(ix+22, iy-14); ctx.stroke();
+
+  ctx.fillStyle = '#C0DD97';
+  ctx.globalAlpha = .85; ctx.beginPath(); ctx.arc(ix-14, iy+55, 5,   0, Math.PI*2); ctx.fill();
+  ctx.globalAlpha = .7;  ctx.beginPath(); ctx.arc(ix-18, iy+68, 3.5, 0, Math.PI*2); ctx.fill();
+  ctx.globalAlpha = 1;
+
+  ctx.fillStyle = '#fff';
+  ctx.font = 'bold 68px Arial, sans-serif';
+  ctx.fillText('BikePredict', 160, iy + 22);
+
+  ctx.fillStyle = '#85B7EB';
+  ctx.font = '27px Arial, sans-serif';
+  ctx.fillText('Know before you leave.', 160, iy + 63);
+
+  // ── RIGHT: prediction bars ────────────────
+  const stations = [
+    { name: 'W 41 ST & 8 AVE',  pct: 79, fill: '#639922', text: '#C0DD97' },
+    { name: '9 AVE & W 39 ST',  pct: 54, fill: '#BA7517', text: '#FAC775' },
+    { name: 'W 44 ST & 10 AVE', pct: 23, fill: '#A32D2D', text: '#F09595' },
+  ];
+
+  const bx = 590, bw = 360, bh = 42;
+  let by = 415;
+  for (const st of stations) {
+    ctx.fillStyle = 'rgba(255,255,255,.42)';
+    ctx.font = '17px Arial, sans-serif';
+    ctx.fillText(st.name, bx, by - 9);
+
+    ctx.fillStyle = 'rgba(255,255,255,.06)';
+    rr(ctx, bx, by, bw, bh, 8); ctx.fill();
+
+    ctx.fillStyle = st.fill;
+    rr(ctx, bx, by, Math.max(bw * st.pct / 100, 10), bh, 8); ctx.fill();
+
+    ctx.fillStyle = st.text;
+    ctx.font = 'bold 24px Arial, sans-serif';
+    ctx.fillText(st.pct + '%', bx + bw + 14, by + bh - 10);
+
+    by += 88;
+  }
+
+  // domain
+  ctx.fillStyle = 'rgba(255,255,255,.22)';
+  ctx.font = '18px Arial, sans-serif';
+  ctx.fillText('BIKEPREDICT.FYI', 80, 730);
+})();
+</script>
+
+</body>
+</html>
