@@ -180,7 +180,7 @@ citibike/
 
 ## About
 
-I'm Clark Prenz — a real estate analyst in NYC who taught myself to build this end-to-end. I worked through the same problems a marketplace company faces: how do you predict a resource that runs out, and how do you get real users to notice you've solved it?
+I'm Clark, a real estate investing analyst in NYC who taught myself to build this end-to-end. I worked through the same problems a marketplace company faces: how do you predict a resource that runs out, and how do you get real users to notice you've solved it?
 
 clark.prenz@gmail.com · [bikepredict.fyi](https://bikepredict.fyi)
 
