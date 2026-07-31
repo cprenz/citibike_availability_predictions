@@ -123,7 +123,7 @@ function buildPopupHTML(stationId: string, name: string, capacity: number, horiz
         </select>
         <select class="popup-pred-time"
           style="${INPUT_STYLE}margin-bottom:8px;cursor:pointer">
-          ${buildTimeSlotOptions("For what time? (optional)")}
+          ${buildTimeSlotOptions("Predict availability for what time? (optional)")}
         </select>
         <button class="popup-submit"
           style="width:100%;padding:9px;background:#2563eb;color:#fff;border:none;
