@@ -43,6 +43,14 @@ export default function RootLayout({
           <a href="/signup" className="text-zinc-600 hover:text-black dark:text-zinc-400 dark:hover:text-white">
             Get Alerts
           </a>
+          <a
+            href="https://github.com/cprenz/citibike_availability_predictions"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="ml-auto text-zinc-500 hover:text-black dark:text-zinc-500 dark:hover:text-white"
+          >
+            View source ↗
+          </a>
         </nav>
         <div className="flex flex-1 flex-col">{children}</div>
 
