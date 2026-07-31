@@ -81,13 +81,20 @@ const INPUT_STYLE =
 function buildPopupHTML(stationId: string, name: string, capacity: number, horizons: HorizonData[]): string {
   const rows = HORIZONS.map((h) => {
     const hz = horizons.find((x) => x.horizon_minutes === h.minutes);
-    const prob = hz != null ? `${Math.round(hz.predicted_prob_logistic * 100)}%` : "--";
+    const probNum = hz != null ? Math.round(hz.predicted_prob_logistic * 100) : 0;
+    const prob = hz != null ? `${probNum}%` : "--";
     const bikes = hz != null ? Math.round(hz.predicted_value_lgbm) : "--";
     const color = hz != null ? probColor(hz.predicted_prob_logistic) : "#666";
+    const bar = hz != null
+      ? `<div style="background:#e5e7eb;border-radius:3px;overflow:hidden;width:72px;height:7px;display:inline-block;vertical-align:middle">
+           <div style="width:${probNum}%;height:100%;background:${color}"></div>
+         </div>`
+      : `<div style="width:72px;height:7px;display:inline-block"></div>`;
     return `<tr>
       <td style="padding:3px 8px;color:#444">${h.label}</td>
-      <td style="padding:3px 8px;text-align:right;color:#111;font-weight:600">${bikes}</td>
+      <td style="padding:3px 8px">${bar}</td>
       <td style="padding:3px 8px;text-align:right;color:${color};font-weight:600">${prob}</td>
+      <td style="padding:3px 8px;text-align:right;color:#111;font-weight:600">${bikes}</td>
     </tr>`;
   }).join("");
 
@@ -98,8 +105,9 @@ function buildPopupHTML(stationId: string, name: string, capacity: number, horiz
       <table style="width:100%;font-size:12px;border-collapse:collapse">
         <tr style="font-size:11px;color:#666">
           <th style="text-align:left;padding:3px 8px">Horizon</th>
-          <th style="text-align:right;padding:3px 8px">Bikes</th>
+          <th style="padding:3px 8px"></th>
           <th style="text-align:right;padding:3px 8px">Prob.</th>
+          <th style="text-align:right;padding:3px 8px">Bikes</th>
         </tr>
         ${rows}
       </table>

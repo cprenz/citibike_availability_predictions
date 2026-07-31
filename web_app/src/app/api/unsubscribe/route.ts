@@ -91,7 +91,7 @@ export async function POST(request: Request) {
 
       // Look up all subscriber rows for this email
       const rows = await querySnowflake(
-        "SELECT id, email, station_id, created_at FROM subscribers WHERE email = ?",
+        "SELECT id, email, station_id, target_time, created_at FROM subscribers WHERE email = ?",
         [email]
       );
 
@@ -103,8 +103,8 @@ export async function POST(request: Request) {
       // Archive each row to unsubscribed before deleting
       for (const row of rows) {
         await executeSnowflake(
-          "INSERT INTO unsubscribed (email, station_id, subscribed_at) VALUES (?, ?, ?)",
-          [row.email, row.station_id, row.created_at]
+          "INSERT INTO unsubscribed (email, station_id, target_time, subscribed_at) VALUES (?, ?, ?, ?)",
+          [row.email, row.station_id, row.target_time ?? null, row.created_at]
         );
       }
 
@@ -121,7 +121,7 @@ export async function POST(request: Request) {
       }
 
       const rows = await querySnowflake(
-        "SELECT email, station_id, created_at FROM subscribers WHERE id = ?",
+        "SELECT email, station_id, target_time, created_at FROM subscribers WHERE id = ?",
         [id]
       );
 
@@ -129,11 +129,11 @@ export async function POST(request: Request) {
         return NextResponse.json({ ok: true });
       }
 
-      const { email, station_id, created_at } = rows[0];
+      const { email, station_id, target_time, created_at } = rows[0];
 
       await executeSnowflake(
-        "INSERT INTO unsubscribed (email, station_id, subscribed_at) VALUES (?, ?, ?)",
-        [email, station_id, created_at]
+        "INSERT INTO unsubscribed (email, station_id, target_time, subscribed_at) VALUES (?, ?, ?, ?)",
+        [email, station_id, target_time ?? null, created_at]
       );
 
       await executeSnowflake("DELETE FROM subscribers WHERE email = ?", [email]);
