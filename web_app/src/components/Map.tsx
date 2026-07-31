@@ -313,8 +313,12 @@ export default function Map() {
                     <div style="font-weight:700;color:#16a34a;font-size:13px">You're signed up!</div>
                     <div style="font-size:11px;color:#555;margin-top:4px">Check your email for a confirmation.</div>
                   </div>`;
-                cancelClose();
-                window.setTimeout(() => closePopup(), 4000);
+                // Defer past the mouseleave event the popup resize triggers;
+                // scheduleClose() inside mouseleave would cancel our 4s timer otherwise.
+                window.setTimeout(() => {
+                  cancelClose();
+                  window.setTimeout(() => closePopup(), 4000);
+                }, 0);
               }
             }
           } catch {
