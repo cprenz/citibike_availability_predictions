@@ -36,6 +36,7 @@ export default function SignupForm({ initialStationId }: { initialStationId: str
   const [email, setEmail] = useState("");
   const [stationId, setStationId] = useState(initialStationId);
   const [targetTime, setTargetTime] = useState("");
+  const [predictionTime, setPredictionTime] = useState("");
   const [status, setStatus] = useState<"idle" | "submitting" | "done">("idle");
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
@@ -85,6 +86,7 @@ export default function SignupForm({ initialStationId }: { initialStationId: str
           station_id: stationId,
           station_name: selectedStationName ?? null,
           target_time: targetTime || null,
+          prediction_time: predictionTime || null,
           horizons: [60, 180, 360, 720, 1440, 2880],
           threshold: 1,
         }),
@@ -141,12 +143,14 @@ export default function SignupForm({ initialStationId }: { initialStationId: str
           <div className="mb-2 text-2xl">&#10003;</div>
           <h2 className="mb-2 text-xl font-semibold">You&apos;re signed up</h2>
           <p className="text-sm text-zinc-600 dark:text-zinc-400">
-            We&apos;ll alert you about bike availability
-            {selectedStationName ? ` at ${selectedStationName}` : ""}
             {targetTime
-              ? ` around ${TARGET_TIME_SLOTS.find((s) => s.value === targetTime)?.label}`
+              ? `Alert at ${TARGET_TIME_SLOTS.find((s) => s.value === targetTime)?.label}`
+              : "You'll get a daily alert"}
+            {predictionTime
+              ? ` with predictions for ${TARGET_TIME_SLOTS.find((s) => s.value === predictionTime)?.label}`
               : ""}
-            .
+            {selectedStationName ? ` at ${selectedStationName}` : ""}.
+            Check your email for a confirmation.
           </p>
           <a
             href="/"
@@ -208,13 +212,33 @@ export default function SignupForm({ initialStationId }: { initialStationId: str
 
           <div>
             <label className="mb-1 block text-sm font-medium" htmlFor="target-time">
-              When do you want the station alert?{" "}
+              When do you want the alert email?{" "}
               <span className="text-zinc-500">(optional)</span>
             </label>
             <select
               id="target-time"
               value={targetTime}
               onChange={(e) => setTargetTime(e.target.value)}
+              className={SELECT_CLASS}
+            >
+              <option value="">Select a time</option>
+              {TARGET_TIME_SLOTS.map((slot) => (
+                <option key={slot.value} value={slot.value}>
+                  {slot.label}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          <div>
+            <label className="mb-1 block text-sm font-medium" htmlFor="prediction-time">
+              For what time do you want to know availability?{" "}
+              <span className="text-zinc-500">(optional)</span>
+            </label>
+            <select
+              id="prediction-time"
+              value={predictionTime}
+              onChange={(e) => setPredictionTime(e.target.value)}
               className={SELECT_CLASS}
             >
               <option value="">Select a time</option>

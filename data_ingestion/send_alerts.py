@@ -43,8 +43,7 @@ except ImportError:
 ET = ZoneInfo("America/New_York")
 FROM_EMAIL = "BikePredict <alerts@bikepredict.fyi>"
 APP_URL = "https://bikepredict.fyi"
-# Only 1hr and 3hr for MVP — close enough to the target time to be actionable
-ACTIVE_HORIZONS = (60, 180)
+ANCHORS = [60, 180, 360, 720, 1440, 2880]
 
 logging.basicConfig(
     level=logging.INFO,
@@ -91,55 +90,75 @@ def _ensure_sent_alerts_table(cur):
     """)
 
 
+def _hhmm_to_minutes(hhmm: str) -> int:
+    return int(hhmm[:2]) * 60 + int(hhmm[3:])
+
+
+def _interpolate(horizon_rows: list[dict], target_minutes: int) -> dict | None:
+    """Linear interpolation between the two nearest anchor horizons."""
+    clamped = max(ANCHORS[0], min(ANCHORS[-1], target_minutes))
+
+    lower = upper = None
+    for i in range(len(ANCHORS) - 1):
+        if ANCHORS[i] <= clamped <= ANCHORS[i + 1]:
+            lower, upper = ANCHORS[i], ANCHORS[i + 1]
+            break
+    if lower is None:
+        lower = upper = ANCHORS[-1]
+
+    lo = next((r for r in horizon_rows if r["horizon_minutes"] == lower), None)
+    hi = next((r for r in horizon_rows if r["horizon_minutes"] == upper), None)
+
+    if not lo and not hi:
+        return None
+    if not lo or lower == upper:
+        return hi or lo
+    if not hi:
+        return lo
+
+    t = (clamped - lower) / (upper - lower)
+    return {
+        "predicted_prob_logistic": lo["predicted_prob_logistic"] * (1 - t) + hi["predicted_prob_logistic"] * t,
+        "predicted_value_lgbm": lo["predicted_value_lgbm"] * (1 - t) + hi["predicted_value_lgbm"] * t,
+        "pi_lower": lo["pi_lower"] * (1 - t) + hi["pi_lower"] * t,
+        "pi_upper": lo["pi_upper"] * (1 - t) + hi["pi_upper"] * t,
+    }
+
+
 def _get_alerts_to_send(cur, current_hour_et: int) -> list[dict]:
     """
-    Return subscriber rows whose alert should fire at this ET hour.
-
-    Alert fires when floor((target_time_minutes - horizon_minutes) % 1440 / 60)
-    equals the current ET hour. Example: target_time='08:00', horizon=180 fires
-    at floor((480 - 180 + 1440) % 1440 / 60) = floor(300 / 60) = 5 (5 AM ET).
-
-    Joins to the most recent model_predictions row per station+horizon.
+    Return one row per (subscriber, horizon) where target_time's hour matches
+    current_hour_et. Python side groups by subscriber and interpolates to
+    the prediction_time the user chose.
     """
     query = """
-        WITH base AS (
-            SELECT
-                s.id                        AS subscriber_id,
-                s.email,
-                s.station_id,
-                s.target_time,
-                s.horizon_minutes,
-                si.name                     AS station_name,
-                mp.predicted_prob_logistic,
-                mp.predicted_value_lgbm,
-                mp.pi_lower,
-                mp.pi_upper,
-                MOD(
-                    TO_NUMBER(SPLIT_PART(s.target_time, ':', 1)) * 60
-                    + TO_NUMBER(SPLIT_PART(s.target_time, ':', 2))
-                    - s.horizon_minutes + 1440,
-                    1440
-                ) AS alert_minutes
-            FROM subscribers s
-            JOIN station_information si
-                ON  si.station_id = s.station_id
-            JOIN model_predictions mp
-                ON  mp.station_id      = s.station_id
-                AND mp.horizon_minutes = s.horizon_minutes
-                AND mp.predicted_at    = (
-                    SELECT MAX(mp2.predicted_at)
-                    FROM   model_predictions mp2
-                    WHERE  mp2.station_id      = s.station_id
-                      AND  mp2.horizon_minutes = s.horizon_minutes
-                )
-            WHERE s.email           IS NOT NULL
-              AND s.target_time     IS NOT NULL
-              AND s.horizon_minutes IN (60, 180)
-        )
-        SELECT *
-        FROM   base
-        WHERE  FLOOR(alert_minutes / 60) = %s
-        ORDER  BY email, station_id
+        SELECT
+            s.id                        AS subscriber_id,
+            s.email,
+            s.station_id,
+            s.target_time,
+            s.prediction_time,
+            si.name                     AS station_name,
+            mp.horizon_minutes,
+            mp.predicted_prob_logistic,
+            mp.predicted_value_lgbm,
+            mp.pi_lower,
+            mp.pi_upper
+        FROM subscribers s
+        JOIN station_information si
+            ON  si.station_id = s.station_id
+        JOIN model_predictions mp
+            ON  mp.station_id   = s.station_id
+            AND mp.predicted_at = (
+                SELECT MAX(mp2.predicted_at)
+                FROM   model_predictions mp2
+                WHERE  mp2.station_id = s.station_id
+            )
+        WHERE s.email           IS NOT NULL
+          AND s.target_time     IS NOT NULL
+          AND s.prediction_time IS NOT NULL
+          AND TO_NUMBER(SPLIT_PART(s.target_time, ':', 1)) = %s
+        ORDER BY s.id, mp.horizon_minutes
     """
     cur.execute(query, (current_hour_et,))
     cols = [d[0].lower() for d in cur.description]
@@ -182,20 +201,21 @@ def _prob_hex(prob: float) -> str:
     return "#dc2626"
 
 
-def _build_email(alert: dict) -> dict:
-    prob_pct = round(alert["predicted_prob_logistic"] * 100)
-    bikes = round(alert["predicted_value_lgbm"])
-    pi_lo = max(0, round(alert["pi_lower"]))
-    pi_hi = round(alert["pi_upper"])
-    station = alert["station_name"]
-    target_str = _fmt_time(alert["target_time"])
-    station_url = f"{APP_URL}/station/{alert['station_id']}"
+def _build_email(sub: dict, prediction: dict) -> dict:
+    prob_pct = round(prediction["predicted_prob_logistic"] * 100)
+    bikes = round(prediction["predicted_value_lgbm"])
+    pi_lo = max(0, round(prediction["pi_lower"]))
+    pi_hi = round(prediction["pi_upper"])
+    station = sub["station_name"]
+    alert_str = _fmt_time(sub["target_time"])
+    pred_str = _fmt_time(sub["prediction_time"])
+    station_url = f"{APP_URL}/station/{sub['station_id']}"
     unsub_url = f"{APP_URL}/signup"
-    prob_color = _prob_hex(alert["predicted_prob_logistic"])
+    prob_color = _prob_hex(prediction["predicted_prob_logistic"])
 
     subject = (
-        f"Heads up: {station} at {target_str} -- "
-        f"{prob_pct}% probability a bike is available"
+        f"Bike alert: {station} at {pred_str} -- "
+        f"{prob_pct}% chance a bike is available"
     )
 
     html = f"""<!DOCTYPE html>
@@ -205,12 +225,15 @@ def _build_email(alert: dict) -> dict:
             overflow:hidden;box-shadow:0 1px 4px rgba(0,0,0,.08)">
 
   <div style="background:#1e40af;padding:20px 28px">
-    <span style="color:#fff;font-weight:700;font-size:16px">Citi Bike Predictions</span>
+    <span style="color:#fff;font-weight:700;font-size:16px">BikePredict</span>
   </div>
 
   <div style="padding:28px">
     <p style="margin:0 0 4px;font-size:18px;font-weight:700;color:#111">{station}</p>
-    <p style="margin:0 0 20px;font-size:14px;color:#6b7280">Alert for {target_str}</p>
+    <p style="margin:0 0 20px;font-size:14px;color:#6b7280">
+      Predicted availability at <strong>{pred_str}</strong>
+      &nbsp;&middot;&nbsp; Alert sent at {alert_str}
+    </p>
 
     <div style="background:#f9fafb;border-radius:10px;padding:20px;margin-bottom:24px">
       <div style="font-size:40px;font-weight:700;color:#111;line-height:1">{bikes}</div>
@@ -219,7 +242,7 @@ def _build_email(alert: dict) -> dict:
         {prob_pct}%
       </div>
       <div style="font-size:13px;color:#6b7280;margin-top:2px">
-        probability at least one bike is available
+        probability at least one bike is available at {pred_str}
       </div>
       <div style="margin-top:8px;font-size:12px;color:#9ca3af">
         95% range: {pi_lo} to {pi_hi} bikes
@@ -235,35 +258,36 @@ def _build_email(alert: dict) -> dict:
 
   <div style="padding:16px 28px;border-top:1px solid #e5e7eb;
               font-size:12px;color:#9ca3af;line-height:1.6">
-    You signed up for Citi Bike availability alerts.<br>
+    You signed up for Citi Bike availability alerts at bikepredict.fyi.<br>
+    Not affiliated with Citi Bike, Lyft, or NYC Bike Share.<br>
     <a href="{unsub_url}" style="color:#9ca3af">Unsubscribe</a>
-    &nbsp;&bull;&nbsp;Clark Prenz, New York, NY
+    &nbsp;&bull;&nbsp; New York, NY
   </div>
 </div>
 </body>
 </html>"""
 
     plain = (
-        f"Citi Bike Alert -- {station} at {target_str}\n\n"
+        f"BikePredict -- {station} at {pred_str}\n\n"
         f"{bikes} bikes predicted | {prob_pct}% probability a bike is available\n"
         f"95% range: {pi_lo} to {pi_hi} bikes\n\n"
         f"Full forecast: {station_url}\n\n"
         f"Unsubscribe: {unsub_url}\n"
-        f"Clark Prenz, New York, NY"
+        f"New York, NY"
     )
 
     return {"subject": subject, "html": html, "text": plain}
 
 
-def _send_email(alert: dict):
+def _send_email(sub: dict, prediction: dict):
     resend_sdk.api_key = os.environ["RESEND_API_KEY"]
-    email = _build_email(alert)
+    content = _build_email(sub, prediction)
     resend_sdk.Emails.send({
         "from": FROM_EMAIL,
-        "to": alert["email"],
-        "subject": email["subject"],
-        "html": email["html"],
-        "text": email["text"],
+        "to": sub["email"],
+        "subject": content["subject"],
+        "html": content["html"],
+        "text": content["text"],
         "headers": {
             # Gmail shows a native unsubscribe button when this header is present
             "List-Unsubscribe": f"<{APP_URL}/signup>",
@@ -295,36 +319,62 @@ def main():
     try:
         _ensure_sent_alerts_table(cur)
 
-        alerts = _get_alerts_to_send(cur, now_et.hour)
-        log.info("%d subscriber row(s) match hour %d", len(alerts), now_et.hour)
+        rows = _get_alerts_to_send(cur, now_et.hour)
+        log.info("%d prediction row(s) match hour %d", len(rows), now_et.hour)
+
+        # Group by subscriber_id — each subscriber has 6 horizon rows
+        grouped: dict[int, dict] = {}
+        for row in rows:
+            sub_id = int(row["subscriber_id"])
+            if sub_id not in grouped:
+                grouped[sub_id] = {"sub": row, "horizons": []}
+            grouped[sub_id]["horizons"].append(row)
 
         sent = skipped = errors = 0
 
-        for alert in alerts:
-            sub_id = int(alert["subscriber_id"])
+        for sub_id, data in grouped.items():
+            sub = data["sub"]
+            horizon_rows = data["horizons"]
 
             if _already_sent(cur, sub_id, today):
                 log.info(
                     "Skip (already sent today): sub %d / %s",
                     sub_id,
-                    alert["station_name"],
+                    sub["station_name"],
                 )
                 skipped += 1
                 continue
 
+            # Compute target horizon: how far ahead is prediction_time from target_time?
+            target_min = (
+                _hhmm_to_minutes(sub["prediction_time"])
+                - _hhmm_to_minutes(sub["target_time"])
+                + 1440
+            ) % 1440
+
+            prediction = _interpolate(horizon_rows, target_min)
+            if not prediction:
+                log.warning(
+                    "No prediction data for sub %d (%s) -- skipping",
+                    sub_id,
+                    sub["station_name"],
+                )
+                continue
+
             try:
-                _send_email(alert)
+                _send_email(sub, prediction)
                 _record_sent(cur, sub_id, today)
                 log.info(
-                    "Sent -> %s | %s at %s | %d%%",
-                    alert["email"],
-                    alert["station_name"],
-                    alert["target_time"],
-                    round(alert["predicted_prob_logistic"] * 100),
+                    "Sent -> %s | %s | alert %s / pred %s | %d%%",
+                    sub["email"],
+                    sub["station_name"],
+                    sub["target_time"],
+                    sub["prediction_time"],
+                    round(prediction["predicted_prob_logistic"] * 100),
                 )
                 sent += 1
             except Exception as exc:
-                log.error("Failed sub %d (%s): %s", sub_id, alert["email"], exc)
+                log.error("Failed sub %d (%s): %s", sub_id, sub["email"], exc)
                 errors += 1
 
         log.info("Done -- %d sent, %d skipped (dup), %d errors", sent, skipped, errors)

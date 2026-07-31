@@ -21,6 +21,7 @@ type SubscribeBody = {
   station_id?: string;
   station_name?: string | null;
   target_time?: string | null;
+  prediction_time?: string | null;
   horizons?: number[];
   threshold?: number | null;
 };
@@ -85,13 +86,15 @@ async function sendConfirmationEmail(
   email: string,
   stationName: string | null,
   stationId: string,
-  targetTime: string | null
+  targetTime: string | null,
+  predictionTime: string | null
 ): Promise<void> {
   const apiKey = process.env.RESEND_API_KEY;
   if (!apiKey) return;
 
   const stationLabel = stationName ?? stationId;
-  const timeLabel = targetTime ? formatTime(targetTime) : null;
+  const alertLabel = targetTime ? formatTime(targetTime) : null;
+  const predLabel = predictionTime ? formatTime(predictionTime) : null;
   const stationUrl = `https://bikepredict.fyi/station/${stationId}`;
   const unsubUrl = `https://bikepredict.fyi/signup`;
 
@@ -118,7 +121,7 @@ async function sendConfirmationEmail(
               You&rsquo;re signed up for alerts
             </p>
             <p style="margin:0 0 24px;font-size:14px;color:#6b7280">
-              We&rsquo;ll let you know when bikes are predicted to be available.
+              Here&rsquo;s when you&rsquo;ll hear from us and what each email will tell you.
             </p>
 
             <!-- Station info box -->
@@ -128,19 +131,28 @@ async function sendConfirmationEmail(
                 <td style="padding:20px 24px">
                   <div style="font-size:11px;font-weight:600;color:#6b7280;letter-spacing:0.06em;text-transform:uppercase;margin-bottom:4px">Station</div>
                   <div style="font-size:16px;font-weight:700;color:#111">${stationLabel}</div>
-                  ${timeLabel ? `
+                  ${alertLabel ? `
                   <div style="margin-top:14px;padding-top:14px;border-top:1px solid #e5e7eb">
-                    <div style="font-size:11px;font-weight:600;color:#6b7280;letter-spacing:0.06em;text-transform:uppercase;margin-bottom:4px">Alert time</div>
-                    <div style="font-size:16px;font-weight:700;color:#111">${timeLabel} daily</div>
+                    <div style="font-size:11px;font-weight:600;color:#6b7280;letter-spacing:0.06em;text-transform:uppercase;margin-bottom:4px">You&rsquo;ll get an email at</div>
+                    <div style="font-size:16px;font-weight:700;color:#111">${alertLabel} daily</div>
+                  </div>` : ""}
+                  ${predLabel ? `
+                  <div style="margin-top:14px;padding-top:14px;border-top:1px solid #e5e7eb">
+                    <div style="font-size:11px;font-weight:600;color:#6b7280;letter-spacing:0.06em;text-transform:uppercase;margin-bottom:4px">Predictions for</div>
+                    <div style="font-size:16px;font-weight:700;color:#111">${predLabel}</div>
                   </div>` : ""}
                 </td>
               </tr>
             </table>
 
             <p style="margin:0 0 24px;font-size:14px;color:#374151;line-height:1.5">
-              We check predictions hourly and send an email when your station is predicted to have bikes available
-              ${timeLabel ? `around <strong>${timeLabel}</strong>` : "at your alert time"}.
-              You&rsquo;ll only get one email per day per station.
+              ${alertLabel && predLabel
+                ? `Your alert arrives at <strong>${alertLabel}</strong> each day with predicted bike availability for <strong>${predLabel}</strong> &mdash; so you can plan before you need to leave.`
+                : alertLabel
+                  ? `Your alert arrives at <strong>${alertLabel}</strong> each day with the latest bike availability predictions for this station.`
+                  : `You&rsquo;ll receive a daily email with the latest bike availability predictions for this station.`
+              }
+              You&rsquo;ll get one email per day per station. Visit the station page to see the full forecast across all time horizons.
             </p>
 
             <!-- CTA button -->
@@ -207,6 +219,7 @@ export async function POST(request: Request) {
   const stationId = body.station_id?.trim();
   const stationName = body.station_name?.trim() || null;
   const targetTime = body.target_time?.trim() || null;
+  const predictionTime = body.prediction_time?.trim() || null;
   const horizons = Array.isArray(body.horizons) ? body.horizons : [];
   const threshold =
     typeof body.threshold === "number" && Number.isFinite(body.threshold)
@@ -237,6 +250,12 @@ export async function POST(request: Request) {
       { status: 400 }
     );
   }
+  if (predictionTime && !isValidTime(predictionTime)) {
+    return NextResponse.json(
+      { error: "Prediction time must be in HH:MM format." },
+      { status: 400 }
+    );
+  }
   const cleanHorizons = horizons.filter((h) => VALID_HORIZONS.has(h));
   if (cleanHorizons.length === 0) {
     return NextResponse.json(
@@ -246,27 +265,28 @@ export async function POST(request: Request) {
   }
 
   // Build a single multi-row INSERT — avoids needing explicit transactions.
-  const placeholders = cleanHorizons.map(() => "(?, ?, ?, ?, ?, ?, ?)").join(", ");
+  const placeholders = cleanHorizons.map(() => "(?, ?, ?, ?, ?, ?, ?, ?)").join(", ");
   const binds = cleanHorizons.flatMap((h) => [
     email,
     phone,
     stationId,
     stationName,
     targetTime,
+    predictionTime,
     h,
     threshold,
   ]);
 
   try {
     await executeSnowflake(
-      `INSERT INTO subscribers (email, phone, station_id, station_name, target_time, horizon_minutes, threshold) VALUES ${placeholders}`,
+      `INSERT INTO subscribers (email, phone, station_id, station_name, target_time, prediction_time, horizon_minutes, threshold) VALUES ${placeholders}`,
       binds
     );
 
     // Send confirmation email — must be awaited; Vercel kills the invocation
     // the moment the response is returned, so fire-and-forget doesn't work.
     if (email) {
-      await sendConfirmationEmail(email, stationName, stationId, targetTime);
+      await sendConfirmationEmail(email, stationName, stationId, targetTime, predictionTime);
     }
 
     return NextResponse.json({ ok: true, count: cleanHorizons.length });

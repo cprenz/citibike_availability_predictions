@@ -60,8 +60,8 @@ function buildGeoJSON(
   };
 }
 
-function buildTimeSlotOptions(): string {
-  const opts: string[] = ['<option value="">When do you want the alert?</option>'];
+function buildTimeSlotOptions(placeholder: string): string {
+  const opts: string[] = [`<option value="">${placeholder}</option>`];
   for (let h = 0; h < 24; h++) {
     for (let m = 0; m < 60; m += 30) {
       const value = `${h.toString().padStart(2, "0")}:${m.toString().padStart(2, "0")}`;
@@ -118,8 +118,12 @@ function buildPopupHTML(stationId: string, name: string, capacity: number, horiz
         <input class="popup-email" type="email" placeholder="Email"
           style="${INPUT_STYLE}" autocomplete="email" />
         <select class="popup-time"
+          style="${INPUT_STYLE}cursor:pointer">
+          ${buildTimeSlotOptions("When do you want the alert email?")}
+        </select>
+        <select class="popup-pred-time"
           style="${INPUT_STYLE}margin-bottom:8px;cursor:pointer">
-          ${buildTimeSlotOptions()}
+          ${buildTimeSlotOptions("For what time? (optional)")}
         </select>
         <button class="popup-submit"
           style="width:100%;padding:9px;background:#2563eb;color:#fff;border:none;
@@ -272,9 +276,11 @@ export default function Map() {
           // Query at click time so Mapbox rendering is definitely settled
           const emailEl = el.querySelector(".popup-email") as HTMLInputElement | null;
           const timeEl = el.querySelector(".popup-time") as HTMLSelectElement | null;
+          const predTimeEl = el.querySelector(".popup-pred-time") as HTMLSelectElement | null;
           const msgEl = el.querySelector(".popup-msg") as HTMLDivElement | null;
           const email = emailEl?.value.trim() ?? "";
           const targetTime = timeEl?.value ?? "";
+          const predictionTime = predTimeEl?.value ?? "";
 
           if (!email) {
             if (msgEl) { msgEl.style.color = "#dc2626"; msgEl.textContent = "Enter your email address."; }
@@ -293,6 +299,7 @@ export default function Map() {
                 station_id: p.id,
                 station_name: p.name,
                 target_time: targetTime || null,
+                prediction_time: predictionTime || null,
                 horizons: [60, 180, 360, 720, 1440, 2880],
                 threshold: 1,
               }),
