@@ -263,9 +263,10 @@ export async function POST(request: Request) {
       binds
     );
 
-    // Fire-and-forget confirmation email (only when email is provided)
+    // Send confirmation email — must be awaited; Vercel kills the invocation
+    // the moment the response is returned, so fire-and-forget doesn't work.
     if (email) {
-      sendConfirmationEmail(email, stationName, stationId, targetTime);
+      await sendConfirmationEmail(email, stationName, stationId, targetTime);
     }
 
     return NextResponse.json({ ok: true, count: cleanHorizons.length });

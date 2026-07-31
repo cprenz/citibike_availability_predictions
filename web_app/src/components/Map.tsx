@@ -311,8 +311,10 @@ export default function Map() {
                   <div style="text-align:center;padding:12px 0">
                     <div style="font-size:20px;margin-bottom:4px">&#10003;</div>
                     <div style="font-weight:700;color:#16a34a;font-size:13px">You're signed up!</div>
-                    <div style="font-size:11px;color:#555;margin-top:4px">We'll alert you about bike availability at this station.</div>
+                    <div style="font-size:11px;color:#555;margin-top:4px">Check your email for a confirmation.</div>
                   </div>`;
+                cancelClose();
+                window.setTimeout(() => closePopup(), 4000);
               }
             }
           } catch {
