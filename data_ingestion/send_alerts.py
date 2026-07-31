@@ -41,8 +41,8 @@ except ImportError:
 # ---------------------------------------------------------------------------
 
 ET = ZoneInfo("America/New_York")
-FROM_EMAIL = "Citi Bike Predictions <alerts@bikepredict.fyi>"
-APP_URL = "https://citibike-availability-predictions.vercel.app"
+FROM_EMAIL = "BikePredict <alerts@bikepredict.fyi>"
+APP_URL = "https://bikepredict.fyi"
 # Only 1hr and 3hr for MVP — close enough to the target time to be actionable
 ACTIVE_HORIZONS = (60, 180)
 
