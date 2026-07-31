@@ -265,13 +265,14 @@ export default function Map() {
         el.addEventListener("mouseleave", scheduleClose);
 
         // Wire up the inline alert form
-        const emailEl = el.querySelector(".popup-email") as HTMLInputElement | null;
-        const timeEl = el.querySelector(".popup-time") as HTMLSelectElement | null;
         const submitBtn = el.querySelector(".popup-submit") as HTMLButtonElement | null;
-        const msgEl = el.querySelector(".popup-msg") as HTMLDivElement | null;
         const formWrap = el.querySelector(".popup-form-wrap") as HTMLDivElement | null;
 
         submitBtn?.addEventListener("click", async () => {
+          // Query at click time so Mapbox rendering is definitely settled
+          const emailEl = el.querySelector(".popup-email") as HTMLInputElement | null;
+          const timeEl = el.querySelector(".popup-time") as HTMLSelectElement | null;
+          const msgEl = el.querySelector(".popup-msg") as HTMLDivElement | null;
           const email = emailEl?.value.trim() ?? "";
           const targetTime = timeEl?.value ?? "";
 

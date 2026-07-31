@@ -4,6 +4,15 @@ import fs from "fs";
 import path from "path";
 import { createPrivateKey } from "crypto";
 
+function formatTime(hhmm: string): string {
+  const [hStr, mStr] = hhmm.split(":");
+  const h = parseInt(hStr, 10);
+  const m = mStr ?? "00";
+  const period = h >= 12 ? "PM" : "AM";
+  const displayH = h % 12 === 0 ? 12 : h % 12;
+  return `${displayH}:${m} ${period}`;
+}
+
 const VALID_HORIZONS = new Set([60, 180, 360, 720, 1440, 2880]);
 
 type SubscribeBody = {
@@ -70,6 +79,119 @@ function executeSnowflake(sql: string, binds: unknown[]): Promise<void> {
       });
     });
   });
+}
+
+async function sendConfirmationEmail(
+  email: string,
+  stationName: string | null,
+  stationId: string,
+  targetTime: string | null
+): Promise<void> {
+  const apiKey = process.env.RESEND_API_KEY;
+  if (!apiKey) return;
+
+  const stationLabel = stationName ?? stationId;
+  const timeLabel = targetTime ? formatTime(targetTime) : null;
+  const stationUrl = `https://bikepredict.fyi/station/${stationId}`;
+  const unsubUrl = `https://bikepredict.fyi/signup`;
+
+  const html = `<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
+<body style="margin:0;padding:0;background:#f3f4f6;font-family:system-ui,-apple-system,sans-serif">
+  <table width="100%" cellpadding="0" cellspacing="0" style="padding:32px 16px">
+    <tr><td align="center">
+      <table width="560" cellpadding="0" cellspacing="0" style="max-width:560px;width:100%">
+
+        <!-- Header -->
+        <tr>
+          <td style="background:#1e40af;border-radius:10px 10px 0 0;padding:24px 32px">
+            <span style="color:#fff;font-size:20px;font-weight:700;letter-spacing:-0.3px">BikePredict</span>
+            <span style="color:#93c5fd;font-size:13px;margin-left:12px">bikepredict.fyi</span>
+          </td>
+        </tr>
+
+        <!-- Body -->
+        <tr>
+          <td style="background:#fff;padding:32px">
+            <p style="margin:0 0 6px;font-size:22px;font-weight:700;color:#111;line-height:1.2">
+              You&rsquo;re signed up for alerts
+            </p>
+            <p style="margin:0 0 24px;font-size:14px;color:#6b7280">
+              We&rsquo;ll let you know when bikes are predicted to be available.
+            </p>
+
+            <!-- Station info box -->
+            <table width="100%" cellpadding="0" cellspacing="0"
+              style="background:#f9fafb;border:1px solid #e5e7eb;border-radius:8px;margin-bottom:24px">
+              <tr>
+                <td style="padding:20px 24px">
+                  <div style="font-size:11px;font-weight:600;color:#6b7280;letter-spacing:0.06em;text-transform:uppercase;margin-bottom:4px">Station</div>
+                  <div style="font-size:16px;font-weight:700;color:#111">${stationLabel}</div>
+                  ${timeLabel ? `
+                  <div style="margin-top:14px;padding-top:14px;border-top:1px solid #e5e7eb">
+                    <div style="font-size:11px;font-weight:600;color:#6b7280;letter-spacing:0.06em;text-transform:uppercase;margin-bottom:4px">Alert time</div>
+                    <div style="font-size:16px;font-weight:700;color:#111">${timeLabel} daily</div>
+                  </div>` : ""}
+                </td>
+              </tr>
+            </table>
+
+            <p style="margin:0 0 24px;font-size:14px;color:#374151;line-height:1.5">
+              We check predictions hourly and send an email when your station is predicted to have bikes available
+              ${timeLabel ? `around <strong>${timeLabel}</strong>` : "at your alert time"}.
+              You&rsquo;ll only get one email per day per station.
+            </p>
+
+            <!-- CTA button -->
+            <table cellpadding="0" cellspacing="0">
+              <tr>
+                <td style="background:#2563eb;border-radius:7px">
+                  <a href="${stationUrl}"
+                     style="display:inline-block;padding:12px 24px;color:#fff;font-size:14px;font-weight:600;text-decoration:none">
+                    See predictions for this station &rarr;
+                  </a>
+                </td>
+              </tr>
+            </table>
+          </td>
+        </tr>
+
+        <!-- Footer -->
+        <tr>
+          <td style="background:#f9fafb;border-radius:0 0 10px 10px;padding:20px 32px;border-top:1px solid #e5e7eb">
+            <p style="margin:0;font-size:11px;color:#9ca3af;line-height:1.6">
+              You&rsquo;re receiving this because you signed up at bikepredict.fyi.<br>
+              Not affiliated with Citi Bike, Lyft, or NYC Bike Share.<br>
+              BikePredict &bull; New York, NY &bull;
+              <a href="${unsubUrl}" style="color:#9ca3af;text-decoration:underline">Unsubscribe</a>
+            </p>
+          </td>
+        </tr>
+
+      </table>
+    </td></tr>
+  </table>
+</body>
+</html>`;
+
+  try {
+    await fetch("https://api.resend.com/emails", {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${apiKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        from: "BikePredict <alerts@bikepredict.fyi>",
+        to: [email],
+        subject: `You're signed up for alerts at ${stationLabel}`,
+        html,
+      }),
+    });
+  } catch (err) {
+    console.error("Confirmation email failed (non-fatal):", err);
+  }
 }
 
 export async function POST(request: Request) {
@@ -140,6 +262,12 @@ export async function POST(request: Request) {
       `INSERT INTO subscribers (email, phone, station_id, station_name, target_time, horizon_minutes, threshold) VALUES ${placeholders}`,
       binds
     );
+
+    // Fire-and-forget confirmation email (only when email is provided)
+    if (email) {
+      sendConfirmationEmail(email, stationName, stationId, targetTime);
+    }
+
     return NextResponse.json({ ok: true, count: cleanHorizons.length });
   } catch (err) {
     console.error("Subscribe API error:", err);
