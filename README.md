@@ -150,7 +150,12 @@ Full writeup in [`notebooks/1.01`](notebooks/1.01-hypothesis-ebike-rush-hour.ipy
 - **`/`** — live map of all ~2,400 stations, color-coded green (likely available) / amber / red (likely empty). Click any dot to see the full prediction breakdown across all six time horizons, with an inline alert signup.
 - **`/station/:id`** — detail view for a single station: all six predictions, a confidence range, and a departure-time picker.
 - **`/dashboard`** — historical ridership trends, e-bike vs. classic splits, and demand by hour and borough (Tableau).
+
+<img src="reports/screenshots/dashboard.png" width="800" alt="Tableau analytics dashboard">
+
 - **`/signup`** — email alert signup.
+
+<img src="reports/screenshots/signup.png" width="800" alt="Email alert signup page">
 
 A Meta ad campaign is running to drive signups, with conversion tracked end-to-end through GA4 and the Meta Pixel.
 
