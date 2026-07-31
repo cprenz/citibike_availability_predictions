@@ -83,6 +83,7 @@ export default function SignupForm({ initialStationId }: { initialStationId: str
         body: JSON.stringify({
           email: email.trim(),
           station_id: stationId,
+          station_name: selectedStationName ?? null,
           target_time: targetTime || null,
           horizons: [60, 180, 360, 720, 1440, 2880],
           threshold: 1,

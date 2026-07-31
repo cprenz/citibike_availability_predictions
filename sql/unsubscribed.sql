@@ -11,6 +11,7 @@ CREATE TABLE IF NOT EXISTS unsubscribed (
     id              INTEGER AUTOINCREMENT PRIMARY KEY,
     email           TEXT,
     station_id      TEXT,
+    station_name    TEXT,
     target_time     VARCHAR(5),
     subscribed_at   TIMESTAMP_TZ,
     unsubscribed_at TIMESTAMP_TZ DEFAULT CURRENT_TIMESTAMP

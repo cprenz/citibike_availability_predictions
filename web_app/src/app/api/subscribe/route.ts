@@ -10,6 +10,7 @@ type SubscribeBody = {
   email?: string | null;
   phone?: string | null;
   station_id?: string;
+  station_name?: string | null;
   target_time?: string | null;
   horizons?: number[];
   threshold?: number | null;
@@ -82,6 +83,7 @@ export async function POST(request: Request) {
   const email = body.email?.trim() || null;
   const phone = body.phone?.trim() || null;
   const stationId = body.station_id?.trim();
+  const stationName = body.station_name?.trim() || null;
   const targetTime = body.target_time?.trim() || null;
   const horizons = Array.isArray(body.horizons) ? body.horizons : [];
   const threshold =
@@ -122,11 +124,12 @@ export async function POST(request: Request) {
   }
 
   // Build a single multi-row INSERT — avoids needing explicit transactions.
-  const placeholders = cleanHorizons.map(() => "(?, ?, ?, ?, ?, ?)").join(", ");
+  const placeholders = cleanHorizons.map(() => "(?, ?, ?, ?, ?, ?, ?)").join(", ");
   const binds = cleanHorizons.flatMap((h) => [
     email,
     phone,
     stationId,
+    stationName,
     targetTime,
     h,
     threshold,
@@ -134,7 +137,7 @@ export async function POST(request: Request) {
 
   try {
     await executeSnowflake(
-      `INSERT INTO subscribers (email, phone, station_id, target_time, horizon_minutes, threshold) VALUES ${placeholders}`,
+      `INSERT INTO subscribers (email, phone, station_id, station_name, target_time, horizon_minutes, threshold) VALUES ${placeholders}`,
       binds
     );
     return NextResponse.json({ ok: true, count: cleanHorizons.length });

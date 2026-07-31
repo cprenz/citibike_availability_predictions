@@ -290,6 +290,7 @@ export default function Map() {
               body: JSON.stringify({
                 email: email || null,
                 station_id: p.id,
+                station_name: p.name,
                 target_time: targetTime || null,
                 horizons: [60, 180, 360, 720, 1440, 2880],
                 threshold: 1,

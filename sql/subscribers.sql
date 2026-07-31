@@ -3,6 +3,7 @@ CREATE TABLE IF NOT EXISTS subscribers (
     email           TEXT,
     phone           TEXT,
     station_id      VARCHAR(50),
+    station_name    TEXT,
     target_time     VARCHAR(5),
     horizon_minutes INTEGER,
     threshold       FLOAT,
