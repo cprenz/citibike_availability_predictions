@@ -202,13 +202,13 @@ export default function StationDetail({ stationId }: { stationId: string }) {
               htmlFor="departure-time"
               className="text-sm font-medium text-zinc-500"
             >
-              When are you leaving?
+              When do you want availability predictions for?
             </label>
             <select
               id="departure-time"
               value={slotIndex}
               onChange={(e) => setSlotIndex(Number(e.target.value))}
-              className="w-full rounded-lg border border-black/15 bg-transparent px-3 py-2 text-sm outline-none focus:border-blue-500 dark:border-white/20"
+              className="w-full rounded-lg border border-black/15 bg-white px-3 py-2 text-sm text-gray-900 outline-none focus:border-blue-500 dark:border-white/20 dark:bg-zinc-900 dark:text-white"
             >
               {timeSlots.map((slot, i) => (
                 <option key={i} value={i}>
