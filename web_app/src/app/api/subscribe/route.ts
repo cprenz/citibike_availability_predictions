@@ -244,13 +244,25 @@ export async function POST(request: Request) {
       { status: 400 }
     );
   }
-  if (targetTime && !isValidTime(targetTime)) {
+  if (!targetTime) {
+    return NextResponse.json(
+      { error: "Choose when you want the alert email." },
+      { status: 400 }
+    );
+  }
+  if (!predictionTime) {
+    return NextResponse.json(
+      { error: "Choose what time you want availability predictions for." },
+      { status: 400 }
+    );
+  }
+  if (!isValidTime(targetTime)) {
     return NextResponse.json(
       { error: "Target time must be in HH:MM format." },
       { status: 400 }
     );
   }
-  if (predictionTime && !isValidTime(predictionTime)) {
+  if (!isValidTime(predictionTime)) {
     return NextResponse.json(
       { error: "Prediction time must be in HH:MM format." },
       { status: 400 }

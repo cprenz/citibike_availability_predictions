@@ -340,24 +340,32 @@ def main():
         rows = _get_alerts_to_send(cur, current_slot_et, test_mode=args.test)
         log.info("%d prediction row(s) match slot %s", len(rows), current_slot_et)
 
-        # Group by subscriber_id — each subscriber has 6 horizon rows
-        grouped: dict[int, dict] = {}
+        # Group by (email, station_id) — each signup inserts 6 rows (one per horizon)
+        # but all share the same email/station/times and need exactly ONE email.
+        # Use the smallest subscriber_id in each group for dedup tracking.
+        grouped: dict[tuple, dict] = {}
         for row in rows:
-            sub_id = int(row["subscriber_id"])
-            if sub_id not in grouped:
-                grouped[sub_id] = {"sub": row, "horizons": []}
-            grouped[sub_id]["horizons"].append(row)
+            key = (row["email"], row["station_id"])
+            if key not in grouped:
+                grouped[key] = {
+                    "sub": row,
+                    "horizons": [],
+                    "sub_id": int(row["subscriber_id"]),
+                }
+            grouped[key]["horizons"].append(row)
 
         sent = skipped = errors = 0
 
-        for sub_id, data in grouped.items():
+        for key, data in grouped.items():
             sub = data["sub"]
             horizon_rows = data["horizons"]
+            sub_id = data["sub_id"]
 
             if not args.test and _already_sent(cur, sub_id, today):
                 log.info(
-                    "Skip (already sent today): sub %d / %s",
+                    "Skip (already sent today): sub %d / %s / %s",
                     sub_id,
+                    sub["email"],
                     sub["station_name"],
                 )
                 skipped += 1
