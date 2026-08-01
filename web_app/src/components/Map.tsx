@@ -123,7 +123,7 @@ function buildPopupHTML(stationId: string, name: string, capacity: number, horiz
         </select>
         <select class="popup-pred-time"
           style="${INPUT_STYLE}margin-bottom:8px;cursor:pointer">
-          ${buildTimeSlotOptions("Predict availability for what time? (optional)")}
+          ${buildTimeSlotOptions("Predict availability for what time?")}
         </select>
         <button class="popup-submit"
           style="width:100%;padding:9px;background:#2563eb;color:#fff;border:none;
@@ -284,6 +284,14 @@ export default function Map() {
 
           if (!email) {
             if (msgEl) { msgEl.style.color = "#dc2626"; msgEl.textContent = "Enter your email address."; }
+            return;
+          }
+          if (!targetTime) {
+            if (msgEl) { msgEl.style.color = "#dc2626"; msgEl.textContent = "Choose when you want the alert email."; }
+            return;
+          }
+          if (!predictionTime) {
+            if (msgEl) { msgEl.style.color = "#dc2626"; msgEl.textContent = "Choose what time you want availability predictions for."; }
             return;
           }
 

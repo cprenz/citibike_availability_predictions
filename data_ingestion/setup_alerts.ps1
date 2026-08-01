@@ -1,5 +1,5 @@
 # Register the CitibikeAlerts Task Scheduler job.
-# Runs send_alerts.py at :15 each hour (after scoring :05, Snowflake sync :10).
+# Runs send_alerts.py every 30 minutes at :05 and :35.
 # Run once as Administrator.
 
 $ProjectRoot = "C:\Users\clark\Desktop\citibike"
@@ -12,8 +12,8 @@ $Action  = New-ScheduledTaskAction `
     -Argument "`"$Script`" >> `"$LogFile`" 2>&1" `
     -WorkingDirectory $ProjectRoot
 
-$Trigger = New-ScheduledTaskTrigger -RepetitionInterval (New-TimeSpan -Minutes 60) `
-    -Once -At "00:15"
+$Trigger = New-ScheduledTaskTrigger -RepetitionInterval (New-TimeSpan -Minutes 30) `
+    -Once -At "00:00"
 
 $Settings = New-ScheduledTaskSettingsSet `
     -ExecutionTimeLimit (New-TimeSpan -Minutes 10) `
@@ -29,5 +29,5 @@ Register-ScheduledTask `
     -RunLevel   Highest `
     -Force
 
-Write-Host "CitibikeAlerts task registered. Runs every hour at :15."
+Write-Host "CitibikeAlerts task registered. Runs every 30 minutes at :00 and :30."
 Write-Host "Log: $LogFile"

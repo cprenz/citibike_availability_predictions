@@ -1,7 +1,7 @@
 """
-Hourly email alert delivery job.
+Email alert delivery job.
 
-Run at :15 each hour (after scoring :05, Snowflake sync :10).
+Run every 30 minutes at :05 and :35 (after scoring :05, Snowflake sync :10).
 Sends one email per (subscriber_id, date) so a subscriber never gets the
 same alert twice in one day. Only fires for 1hr and 3hr horizons — the most
 actionable lead times for a commuter.
@@ -18,10 +18,12 @@ BigQuery migration (future): swap the _snowflake_conn() block only.
 Everything else — Resend call, email HTML, dedup logic — stays identical.
 """
 
+import argparse
 import logging
 import os
 import sys
 from datetime import datetime, date
+from typing import Optional
 from zoneinfo import ZoneInfo
 
 import snowflake.connector
@@ -94,7 +96,7 @@ def _hhmm_to_minutes(hhmm: str) -> int:
     return int(hhmm[:2]) * 60 + int(hhmm[3:])
 
 
-def _interpolate(horizon_rows: list[dict], target_minutes: int) -> dict | None:
+def _interpolate(horizon_rows: list, target_minutes: int) -> Optional[dict]:
     """Linear interpolation between the two nearest anchor horizons."""
     clamped = max(ANCHORS[0], min(ANCHORS[-1], target_minutes))
 
@@ -125,13 +127,16 @@ def _interpolate(horizon_rows: list[dict], target_minutes: int) -> dict | None:
     }
 
 
-def _get_alerts_to_send(cur, current_hour_et: int) -> list[dict]:
+def _get_alerts_to_send(cur, current_slot_et: str, test_mode: bool = False) -> list[dict]:
     """
-    Return one row per (subscriber, horizon) where target_time's hour matches
-    current_hour_et. Python side groups by subscriber and interpolates to
-    the prediction_time the user chose.
+    Return one row per (subscriber, horizon) where target_time exactly matches
+    current_slot_et (HH:MM rounded to nearest 30min). Python side groups by
+    subscriber and interpolates to the prediction_time the user chose.
+
+    In test_mode, the time filter is skipped so all eligible subscribers fire.
     """
-    query = """
+    hour_filter = "" if test_mode else "AND s.target_time = %s"
+    query = f"""
         SELECT
             s.id                        AS subscriber_id,
             s.email,
@@ -157,10 +162,11 @@ def _get_alerts_to_send(cur, current_hour_et: int) -> list[dict]:
         WHERE s.email           IS NOT NULL
           AND s.target_time     IS NOT NULL
           AND s.prediction_time IS NOT NULL
-          AND TO_NUMBER(SPLIT_PART(s.target_time, ':', 1)) = %s
+          {hour_filter}
         ORDER BY s.id, mp.horizon_minutes
     """
-    cur.execute(query, (current_hour_et,))
+    binds = () if test_mode else (current_slot_et,)
+    cur.execute(query, binds)
     cols = [d[0].lower() for d in cur.description]
     return [dict(zip(cols, row)) for row in cur.fetchall()]
 
@@ -301,12 +307,24 @@ def _send_email(sub: dict, prediction: dict):
 
 
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--test",
+        action="store_true",
+        help="Skip hour filter and dedup check — sends to all eligible subscribers immediately.",
+    )
+    args = parser.parse_args()
+
     now_et = datetime.now(ET)
     today = now_et.date()
+    # Round to nearest 30-min slot (00 or 30)
+    slot_min = 0 if now_et.minute < 30 else 30
+    current_slot_et = f"{now_et.hour:02d}:{slot_min:02d}"
     log.info(
-        "Alert job starting -- %s ET (hour %d)",
+        "Alert job starting -- %s ET (slot %s)%s",
         now_et.strftime("%Y-%m-%d %H:%M"),
-        now_et.hour,
+        current_slot_et,
+        " [TEST MODE]" if args.test else "",
     )
 
     if "RESEND_API_KEY" not in os.environ:
@@ -319,8 +337,8 @@ def main():
     try:
         _ensure_sent_alerts_table(cur)
 
-        rows = _get_alerts_to_send(cur, now_et.hour)
-        log.info("%d prediction row(s) match hour %d", len(rows), now_et.hour)
+        rows = _get_alerts_to_send(cur, current_slot_et, test_mode=args.test)
+        log.info("%d prediction row(s) match slot %s", len(rows), current_slot_et)
 
         # Group by subscriber_id — each subscriber has 6 horizon rows
         grouped: dict[int, dict] = {}
@@ -336,7 +354,7 @@ def main():
             sub = data["sub"]
             horizon_rows = data["horizons"]
 
-            if _already_sent(cur, sub_id, today):
+            if not args.test and _already_sent(cur, sub_id, today):
                 log.info(
                     "Skip (already sent today): sub %d / %s",
                     sub_id,
