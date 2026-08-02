@@ -3,13 +3,11 @@
 # Run once as Administrator.
 
 $ProjectRoot = "C:\Users\clark\Desktop\citibike"
-$PythonW     = "C:\Users\clark\AppData\Local\Programs\Python\Python39\pythonw.exe"
-$Script      = "$ProjectRoot\data_ingestion\send_alerts.py"
-$LogFile     = "$ProjectRoot\data_ingestion\alerts.log"
+$Vbs         = "$ProjectRoot\data_ingestion\alerts_hidden.vbs"
 
 $Action  = New-ScheduledTaskAction `
-    -Execute $PythonW `
-    -Argument "`"$Script`" >> `"$LogFile`" 2>&1" `
+    -Execute "wscript.exe" `
+    -Argument "`"$Vbs`"" `
     -WorkingDirectory $ProjectRoot
 
 $Trigger = New-ScheduledTaskTrigger -RepetitionInterval (New-TimeSpan -Minutes 30) `

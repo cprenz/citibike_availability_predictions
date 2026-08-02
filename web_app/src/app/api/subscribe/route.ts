@@ -62,7 +62,7 @@ async function sendConfirmationEmail(
   const alertLabel   = targetTime     ? formatTime(targetTime)     : null;
   const predLabel    = predictionTime ? formatTime(predictionTime) : null;
   const stationUrl   = `https://bikepredict.fyi/station/${stationId}`;
-  const unsubUrl     = `https://bikepredict.fyi/signup`;
+  const unsubUrl     = `https://bikepredict.fyi/signup?unsub_station=${encodeURIComponent(stationId)}&unsub_email=${encodeURIComponent(email)}`;
 
   const html = `<!DOCTYPE html>
 <html lang="en">
