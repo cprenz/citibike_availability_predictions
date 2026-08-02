@@ -75,8 +75,8 @@ function buildTimeSlotOptions(placeholder: string): string {
 }
 
 const INPUT_STYLE =
-  "width:100%;box-sizing:border-box;padding:7px 9px;border:1px solid #d1d5db;" +
-  "border-radius:6px;font-size:12px;margin-bottom:6px;outline:none;color:#111;background:#fff;font-family:system-ui,sans-serif";
+  "width:100%;box-sizing:border-box;padding:6px 9px;border:1px solid #d1d5db;" +
+  "border-radius:6px;font-size:12px;margin-bottom:4px;outline:none;color:#111;background:#fff;font-family:system-ui,sans-serif";
 
 function buildPopupHTML(stationId: string, name: string, capacity: number, horizons: HorizonData[]): string {
   const rows = HORIZONS.map((h) => {
@@ -86,10 +86,10 @@ function buildPopupHTML(stationId: string, name: string, capacity: number, horiz
     const bikes = hz != null ? Math.round(hz.predicted_value_lgbm) : "--";
     const color = hz != null ? probColor(hz.predicted_prob_logistic) : "#666";
     const bar = hz != null
-      ? `<div style="background:#e5e7eb;border-radius:3px;overflow:hidden;width:72px;height:7px;display:inline-block;vertical-align:middle">
+      ? `<div style="background:#e5e7eb;border-radius:3px;overflow:hidden;width:60px;height:7px;display:inline-block;vertical-align:middle">
            <div style="width:${probNum}%;height:100%;background:${color}"></div>
          </div>`
-      : `<div style="width:72px;height:7px;display:inline-block"></div>`;
+      : `<div style="width:60px;height:7px;display:inline-block"></div>`;
     return `<tr>
       <td style="padding:3px 8px;color:#444">${h.label}</td>
       <td style="padding:3px 8px">${bar}</td>
@@ -99,7 +99,7 @@ function buildPopupHTML(stationId: string, name: string, capacity: number, horiz
   }).join("");
 
   return `
-    <div style="font-family:system-ui,sans-serif;padding:4px 2px">
+    <div style="font-family:system-ui,sans-serif;padding:4px 2px;max-height:60vh;overflow-y:auto;-webkit-overflow-scrolling:touch">
       <div style="font-weight:700;font-size:13px;margin-bottom:3px;color:#000">${name}</div>
       <div style="font-size:11px;color:#666;margin-bottom:10px">Capacity: ${capacity} docks</div>
       <table style="width:100%;font-size:12px;border-collapse:collapse">
@@ -111,8 +111,8 @@ function buildPopupHTML(stationId: string, name: string, capacity: number, horiz
         </tr>
         ${rows}
       </table>
-      <div class="popup-form-wrap" style="margin-top:12px;border-top:1px solid #e5e7eb;padding-top:10px">
-        <div style="font-size:11px;font-weight:700;color:#374151;margin-bottom:8px;letter-spacing:0.02em">
+      <div class="popup-form-wrap" style="margin-top:8px;border-top:1px solid #e5e7eb;padding-top:8px">
+        <div style="font-size:11px;font-weight:700;color:#374151;margin-bottom:6px;letter-spacing:0.02em">
           GET ALERTS FOR THIS STATION
         </div>
         <input class="popup-email" type="email" placeholder="Email"
@@ -126,7 +126,7 @@ function buildPopupHTML(stationId: string, name: string, capacity: number, horiz
           ${buildTimeSlotOptions("Predict availability for what time?")}
         </select>
         <button class="popup-submit"
-          style="width:100%;padding:9px;background:#2563eb;color:#fff;border:none;
+          style="width:100%;padding:8px;background:#2563eb;color:#fff;border:none;
                  border-radius:6px;font-size:12px;font-weight:600;cursor:pointer;
                  font-family:system-ui,sans-serif">
           Get alerts
@@ -352,6 +352,11 @@ export default function Map() {
         map.getCanvas().style.cursor = "";
         scheduleClose();
       });
+      // Mobile tap support — mouseenter doesn't fire on touch devices
+      map.on("click", "stations-circle", (e) => {
+        const feat = e.features?.[0];
+        if (feat) showPopup(feat);
+      });
 
       map.on("click", (e) => {
         const hits = map.queryRenderedFeatures(e.point, { layers: ["stations-circle"] });
@@ -407,8 +412,8 @@ export default function Map() {
         ))}
       </div>
 
-      {/* Legend */}
-      <div className="absolute bottom-8 left-3 z-10 rounded-lg bg-black/70 p-3 text-xs text-white backdrop-blur">
+      {/* Legend — hidden on mobile to avoid overlapping the popup */}
+      <div className="hidden sm:block absolute bottom-8 left-3 z-10 rounded-lg bg-black/70 p-3 text-xs text-white backdrop-blur">
         <div className="mb-1.5 flex items-center gap-2">
           <span className="h-3 w-3 shrink-0 rounded-full bg-green-500" />
           Likely available (&ge;70%)
