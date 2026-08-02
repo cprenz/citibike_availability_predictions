@@ -28,7 +28,13 @@ const SELECT_CLASS =
 const INPUT_CLASS =
   "w-full rounded-lg border border-black/15 bg-transparent px-3 py-2 text-sm outline-none focus:border-blue-500 dark:border-white/20";
 
-export default function SignupForm({ initialStationId }: { initialStationId: string }) {
+export default function SignupForm({
+  initialStationId,
+  unsubStationId = "",
+}: {
+  initialStationId: string;
+  unsubStationId?: string;
+}) {
   const [stations, setStations] = useState<StationOption[]>([]);
   const [stationsError, setStationsError] = useState(false);
 
@@ -63,6 +69,11 @@ export default function SignupForm({ initialStationId }: { initialStationId: str
   const selectedStationName = useMemo(
     () => stations.find((s) => s.station_id === stationId)?.station_name,
     [stations, stationId]
+  );
+
+  const unsubStationName = useMemo(
+    () => stations.find((s) => s.station_id === unsubStationId)?.station_name,
+    [stations, unsubStationId]
   );
 
   async function handleSubmit(e: React.FormEvent) {
@@ -125,10 +136,12 @@ export default function SignupForm({ initialStationId }: { initialStationId: str
     }
     setUnsubStatus("submitting");
     try {
+      const body: Record<string, string> = { email: unsubEmail.trim() };
+      if (unsubStationId) body.station_id = unsubStationId;
       const res = await fetch("/api/unsubscribe", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email: unsubEmail.trim() }),
+        body: JSON.stringify(body),
       });
       const data = await res.json();
       if (res.ok) {
@@ -274,13 +287,26 @@ export default function SignupForm({ initialStationId }: { initialStationId: str
 
       {/* --- Unsubscribe card --- */}
       <div className="rounded-xl border border-black/10 p-6 dark:border-white/15">
-        <h2 className="mb-1 text-base font-semibold">Unsubscribe from alerts</h2>
+        <h2 className="mb-1 text-base font-semibold">
+          {unsubStationId ? "Unsubscribe from this station" : "Unsubscribe from alerts"}
+        </h2>
         <p className="mb-4 text-sm text-zinc-500 dark:text-zinc-400">
-          Enter the email you signed up with to stop all alerts.
+          {unsubStationId
+            ? unsubStationName
+              ? `Enter the email you signed up with to stop alerts for ${unsubStationName}.`
+              : "Enter the email you signed up with to stop alerts for this station."
+            : "Enter the email you signed up with to stop all alerts."}
         </p>
         {unsubStatus === "done" ? (
           <p className="text-sm text-green-700 dark:text-green-400">
-            &#10003; Done. You won&apos;t receive any more alerts.
+            &#10003; Done.{" "}
+            {unsubStationId
+              ? unsubStationName
+                ? `You won't receive alerts for ${unsubStationName} anymore.`
+                : "You won't receive alerts for that station anymore."
+              : "You won't receive any more alerts."}
+            {" "}
+            <a href="/signup" className="underline">Manage other alerts</a>
           </p>
         ) : (
           <form onSubmit={handleUnsubscribe} className="space-y-3">
@@ -299,7 +325,11 @@ export default function SignupForm({ initialStationId }: { initialStationId: str
               disabled={unsubStatus === "submitting"}
               className="w-full rounded-lg border border-black/15 px-4 py-2 text-sm font-medium hover:bg-zinc-100 disabled:opacity-60 dark:border-white/20 dark:hover:bg-zinc-800"
             >
-              {unsubStatus === "submitting" ? "Unsubscribing..." : "Unsubscribe"}
+              {unsubStatus === "submitting"
+                ? "Unsubscribing..."
+                : unsubStationId
+                ? "Unsubscribe from this station"
+                : "Unsubscribe from all alerts"}
             </button>
           </form>
         )}

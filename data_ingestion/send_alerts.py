@@ -207,7 +207,7 @@ def _build_email(sub: dict, prediction: dict) -> dict:
     alert_str = _fmt_time(sub["target_time"])
     pred_str  = _fmt_time(sub["prediction_time"])
     station_url = f"{APP_URL}/station/{sub['station_id']}"
-    unsub_url   = f"{APP_URL}/signup"
+    unsub_url   = f"{APP_URL}/signup?unsub_station={sub['station_id']}"
     prob_color  = _prob_hex(prediction["predicted_prob_logistic"])
 
     subject = (
@@ -286,7 +286,7 @@ def _send_email(sub: dict, prediction: dict):
         "html": content["html"],
         "text": content["text"],
         "headers": {
-            "List-Unsubscribe": f"<{APP_URL}/signup>",
+            "List-Unsubscribe": f"<{APP_URL}/signup?unsub_station={sub['station_id']}>",
         },
     })
 

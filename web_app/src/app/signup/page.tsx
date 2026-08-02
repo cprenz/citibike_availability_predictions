@@ -3,9 +3,9 @@ import SignupForm from "@/components/SignupForm";
 export default async function SignupPage({
   searchParams,
 }: {
-  searchParams: Promise<{ station_id?: string }>;
+  searchParams: Promise<{ station_id?: string; unsub_station?: string }>;
 }) {
-  const { station_id } = await searchParams;
+  const { station_id, unsub_station } = await searchParams;
 
   return (
     <main className="flex flex-1 flex-col items-center gap-6 p-8 sm:p-16">
@@ -16,7 +16,7 @@ export default async function SignupPage({
           be available at your station.
         </p>
       </div>
-      <SignupForm initialStationId={station_id ?? ""} />
+      <SignupForm initialStationId={station_id ?? ""} unsubStationId={unsub_station ?? ""} />
     </main>
   );
 }
