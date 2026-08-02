@@ -76,6 +76,14 @@ export default function SignupForm({ initialStationId }: { initialStationId: str
       setErrorMsg("Choose a station.");
       return;
     }
+    if (!targetTime) {
+      setErrorMsg("Choose when you want the alert email.");
+      return;
+    }
+    if (!predictionTime) {
+      setErrorMsg("Choose what time you want availability predictions for.");
+      return;
+    }
     setStatus("submitting");
     try {
       const res = await fetch("/api/subscribe", {
@@ -212,8 +220,7 @@ export default function SignupForm({ initialStationId }: { initialStationId: str
 
           <div>
             <label className="mb-1 block text-sm font-medium" htmlFor="target-time">
-              When do you want the alert email?{" "}
-              <span className="text-zinc-500">(optional)</span>
+              When do you want the alert email?
             </label>
             <select
               id="target-time"
@@ -232,8 +239,7 @@ export default function SignupForm({ initialStationId }: { initialStationId: str
 
           <div>
             <label className="mb-1 block text-sm font-medium" htmlFor="prediction-time">
-              For what time do you want to know availability?{" "}
-              <span className="text-zinc-500">(optional)</span>
+              For what time do you want to know availability?
             </label>
             <select
               id="prediction-time"
