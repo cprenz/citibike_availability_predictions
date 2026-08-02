@@ -46,12 +46,14 @@ export async function POST(request: Request) {
   try {
     // Find subscriptions — either for one station or all stations
     const [rows] = await bq.query(stationId ? {
-      query: `SELECT email, station_id, station_name, target_time, created_at
+      query: `SELECT email, station_id, station_name, target_time,
+                     FORMAT_TIMESTAMP('%Y-%m-%dT%H:%M:%SZ', created_at) AS created_at_str
               FROM ${subs}
               WHERE email = @email AND station_id = @station_id`,
       params: { email, station_id: stationId },
     } : {
-      query: `SELECT email, station_id, station_name, target_time, created_at
+      query: `SELECT email, station_id, station_name, target_time,
+                     FORMAT_TIMESTAMP('%Y-%m-%dT%H:%M:%SZ', created_at) AS created_at_str
               FROM ${subs}
               WHERE email = @email`,
       params: { email },
@@ -76,7 +78,7 @@ export async function POST(request: Request) {
           station_id:    sid,
           station_name:  row.station_name != null ? String(row.station_name) : null,
           target_time:   row.target_time  != null ? String(row.target_time)  : null,
-          subscribed_at: row.created_at?.value ?? row.created_at ?? null,
+          subscribed_at: row.created_at_str ?? null,
         },
         types: {
           email:         "STRING",
