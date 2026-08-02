@@ -1,21 +1,14 @@
 """
 Email alert delivery job.
 
-Run every 30 minutes at :05 and :35 (after scoring :05, Snowflake sync :10).
-Sends one email per (subscriber_id, date) so a subscriber never gets the
-same alert twice in one day. Only fires for 1hr and 3hr horizons — the most
-actionable lead times for a commuter.
+Run every 30 minutes at :00 and :30 via Task Scheduler (CitibikeAlerts).
+Sends one email per (email, station_id, date) — so a subscriber never gets
+the same alert twice in one day.
 
-Requires env vars (same .env as the other ingestion scripts):
-  SNOWFLAKE_ACCOUNT, SNOWFLAKE_USER, SNOWFLAKE_DATABASE, SNOWFLAKE_SCHEMA,
-  SNOWFLAKE_WAREHOUSE, RESEND_API_KEY
+Requires env vars (data_ingestion/.env):
+  RESEND_API_KEY
 
-Optional:
-  SNOWFLAKE_PRIVATE_KEY — PEM content with literal \\n (Vercel style).
-  Falls back to data_ingestion/snowflake_key.p8 if not set.
-
-BigQuery migration (future): swap the _snowflake_conn() block only.
-Everything else — Resend call, email HTML, dedup logic — stays identical.
+GCP auth: data_ingestion/bigquery_key.json (service account key file).
 """
 
 import argparse
@@ -26,13 +19,11 @@ from datetime import datetime, date
 from typing import Optional
 from zoneinfo import ZoneInfo
 
-import snowflake.connector
-from cryptography.hazmat.primitives.serialization import load_pem_private_key
 from dotenv import load_dotenv
+from google.cloud import bigquery
 
 load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
 
-# pip install resend
 try:
     import resend as resend_sdk
 except ImportError:
@@ -42,10 +33,14 @@ except ImportError:
 # Config
 # ---------------------------------------------------------------------------
 
-ET = ZoneInfo("America/New_York")
+ET      = ZoneInfo("America/New_York")
+PROJECT = "citibike-tableau-501513"
+DATASET = "citibike"
+GCP_KEY = os.path.join(os.path.dirname(__file__), "bigquery_key.json")
+
 FROM_EMAIL = "BikePredict <alerts@bikepredict.fyi>"
-APP_URL = "https://bikepredict.fyi"
-ANCHORS = [60, 180, 360, 720, 1440, 2880]
+APP_URL    = "https://bikepredict.fyi"
+ANCHORS    = [60, 180, 360, 720, 1440, 2880]
 
 logging.basicConfig(
     level=logging.INFO,
@@ -54,42 +49,29 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
+
+def tbl(name):
+    return f"`{PROJECT}.{DATASET}.{name}`"
+
+
 # ---------------------------------------------------------------------------
-# Snowflake helpers
+# BigQuery helpers
 # ---------------------------------------------------------------------------
 
 
-def _load_private_key():
-    pem = os.environ.get("SNOWFLAKE_PRIVATE_KEY")
-    if pem:
-        key_bytes = pem.replace("\\n", "\n").encode()
-    else:
-        key_path = os.path.join(os.path.dirname(__file__), "snowflake_key.p8")
-        with open(key_path, "rb") as f:
-            key_bytes = f.read()
-    return load_pem_private_key(key_bytes, password=None)
+def _bq_client():
+    return bigquery.Client.from_service_account_json(GCP_KEY)
 
 
-def _snowflake_conn():
-    return snowflake.connector.connect(
-        account=os.environ["SNOWFLAKE_ACCOUNT"],
-        user=os.environ["SNOWFLAKE_USER"],
-        private_key=_load_private_key(),
-        database=os.environ.get("SNOWFLAKE_DATABASE", "CITIBIKE"),
-        schema=os.environ.get("SNOWFLAKE_SCHEMA", "PUBLIC"),
-        warehouse=os.environ.get("SNOWFLAKE_WAREHOUSE", "COMPUTE_WH"),
-    )
-
-
-def _ensure_sent_alerts_table(cur):
-    """Create deduplication table if it doesn't exist yet."""
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS sent_alerts (
-            subscriber_id  INTEGER      NOT NULL,
-            alert_date     DATE         NOT NULL,
-            sent_at        TIMESTAMP_TZ DEFAULT CURRENT_TIMESTAMP
+def _ensure_sent_alerts_table(client):
+    client.query(f"""
+        CREATE TABLE IF NOT EXISTS {tbl("sent_alerts")} (
+            email       STRING  NOT NULL,
+            station_id  STRING  NOT NULL,
+            alert_date  DATE    NOT NULL,
+            sent_at     TIMESTAMP
         )
-    """)
+    """).result()
 
 
 def _hhmm_to_minutes(hhmm: str) -> int:
@@ -121,69 +103,79 @@ def _interpolate(horizon_rows: list, target_minutes: int) -> Optional[dict]:
     t = (clamped - lower) / (upper - lower)
     return {
         "predicted_prob_logistic": lo["predicted_prob_logistic"] * (1 - t) + hi["predicted_prob_logistic"] * t,
-        "predicted_value_lgbm": lo["predicted_value_lgbm"] * (1 - t) + hi["predicted_value_lgbm"] * t,
-        "pi_lower": lo["pi_lower"] * (1 - t) + hi["pi_lower"] * t,
-        "pi_upper": lo["pi_upper"] * (1 - t) + hi["pi_upper"] * t,
+        "predicted_value_lgbm":    lo["predicted_value_lgbm"]    * (1 - t) + hi["predicted_value_lgbm"]    * t,
+        "pi_lower":                lo["pi_lower"]                * (1 - t) + hi["pi_lower"]                * t,
+        "pi_upper":                lo["pi_upper"]                * (1 - t) + hi["pi_upper"]                * t,
     }
 
 
-def _get_alerts_to_send(cur, current_slot_et: str, test_mode: bool = False) -> list[dict]:
-    """
-    Return one row per (subscriber, horizon) where target_time exactly matches
-    current_slot_et (HH:MM rounded to nearest 30min). Python side groups by
-    subscriber and interpolates to the prediction_time the user chose.
-
-    In test_mode, the time filter is skipped so all eligible subscribers fire.
-    """
-    hour_filter = "" if test_mode else "AND s.target_time = %s"
+def _get_alerts_to_send(client, current_slot_et: str, test_mode: bool = False) -> list[dict]:
+    # BigQuery does not allow correlated subqueries in JOIN predicates, so we
+    # pre-compute the latest predicted_at per station in a CTE first.
     query = f"""
+        WITH latest AS (
+            SELECT station_id, MAX(predicted_at) AS max_predicted_at
+            FROM   {tbl("model_predictions")}
+            GROUP BY station_id
+        )
         SELECT
-            s.id                        AS subscriber_id,
             s.email,
             s.station_id,
             s.target_time,
             s.prediction_time,
-            si.name                     AS station_name,
+            si.name                    AS station_name,
             mp.horizon_minutes,
             mp.predicted_prob_logistic,
             mp.predicted_value_lgbm,
             mp.pi_lower,
             mp.pi_upper
-        FROM subscribers s
-        JOIN station_information si
-            ON  si.station_id = s.station_id
-        JOIN model_predictions mp
+        FROM {tbl("subscribers")} s
+        JOIN {tbl("station_information")} si
+            ON si.station_id = s.station_id
+        JOIN latest l
+            ON l.station_id = s.station_id
+        JOIN {tbl("model_predictions")} mp
             ON  mp.station_id   = s.station_id
-            AND mp.predicted_at = (
-                SELECT MAX(mp2.predicted_at)
-                FROM   model_predictions mp2
-                WHERE  mp2.station_id = s.station_id
-            )
+            AND mp.predicted_at = l.max_predicted_at
         WHERE s.email           IS NOT NULL
           AND s.target_time     IS NOT NULL
           AND s.prediction_time IS NOT NULL
-          {hour_filter}
-        ORDER BY s.id, mp.horizon_minutes
+          AND (@test_mode OR s.target_time = @slot)
+        ORDER BY s.email, s.station_id, mp.horizon_minutes
     """
-    binds = () if test_mode else (current_slot_et,)
-    cur.execute(query, binds)
-    cols = [d[0].lower() for d in cur.description]
-    return [dict(zip(cols, row)) for row in cur.fetchall()]
+    job_config = bigquery.QueryJobConfig(query_parameters=[
+        bigquery.ScalarQueryParameter("test_mode", "BOOL",   test_mode),
+        bigquery.ScalarQueryParameter("slot",      "STRING", current_slot_et),
+    ])
+    result = client.query(query, job_config=job_config).result()
+    return [dict(row) for row in result]
 
 
-def _already_sent(cur, subscriber_id: int, today: date) -> bool:
-    cur.execute(
-        "SELECT 1 FROM sent_alerts WHERE subscriber_id = %s AND alert_date = %s LIMIT 1",
-        (subscriber_id, today.isoformat()),
-    )
-    return cur.fetchone() is not None
+def _already_sent(client, email: str, station_id: str, today: date) -> bool:
+    job_config = bigquery.QueryJobConfig(query_parameters=[
+        bigquery.ScalarQueryParameter("email",      "STRING", email),
+        bigquery.ScalarQueryParameter("station_id", "STRING", station_id),
+        bigquery.ScalarQueryParameter("today",      "DATE",   today.isoformat()),
+    ])
+    result = client.query(
+        f"SELECT 1 FROM {tbl('sent_alerts')} "
+        "WHERE email = @email AND station_id = @station_id AND alert_date = @today LIMIT 1",
+        job_config=job_config,
+    ).result()
+    return next(iter(result), None) is not None
 
 
-def _record_sent(cur, subscriber_id: int, today: date):
-    cur.execute(
-        "INSERT INTO sent_alerts (subscriber_id, alert_date) VALUES (%s, %s)",
-        (subscriber_id, today.isoformat()),
-    )
+def _record_sent(client, email: str, station_id: str, today: date):
+    job_config = bigquery.QueryJobConfig(query_parameters=[
+        bigquery.ScalarQueryParameter("email",      "STRING", email),
+        bigquery.ScalarQueryParameter("station_id", "STRING", station_id),
+        bigquery.ScalarQueryParameter("today",      "DATE",   today.isoformat()),
+    ])
+    client.query(
+        f"INSERT INTO {tbl('sent_alerts')} (email, station_id, alert_date, sent_at) "
+        "VALUES (@email, @station_id, @today, CURRENT_TIMESTAMP())",
+        job_config=job_config,
+    ).result()
 
 
 # ---------------------------------------------------------------------------
@@ -192,7 +184,6 @@ def _record_sent(cur, subscriber_id: int, today: date):
 
 
 def _fmt_time(hhmm: str) -> str:
-    """'08:00' -> '8:00 AM', '13:30' -> '1:30 PM'"""
     h, m = int(hhmm[:2]), int(hhmm[3:])
     period = "AM" if h < 12 else "PM"
     display_h = h % 12 or 12
@@ -208,16 +199,16 @@ def _prob_hex(prob: float) -> str:
 
 
 def _build_email(sub: dict, prediction: dict) -> dict:
-    prob_pct = round(prediction["predicted_prob_logistic"] * 100)
-    bikes = round(prediction["predicted_value_lgbm"])
-    pi_lo = max(0, round(prediction["pi_lower"]))
-    pi_hi = round(prediction["pi_upper"])
-    station = sub["station_name"]
+    prob_pct  = round(prediction["predicted_prob_logistic"] * 100)
+    bikes     = round(prediction["predicted_value_lgbm"])
+    pi_lo     = max(0, round(prediction["pi_lower"]))
+    pi_hi     = round(prediction["pi_upper"])
+    station   = sub["station_name"]
     alert_str = _fmt_time(sub["target_time"])
-    pred_str = _fmt_time(sub["prediction_time"])
+    pred_str  = _fmt_time(sub["prediction_time"])
     station_url = f"{APP_URL}/station/{sub['station_id']}"
-    unsub_url = f"{APP_URL}/signup"
-    prob_color = _prob_hex(prediction["predicted_prob_logistic"])
+    unsub_url   = f"{APP_URL}/signup"
+    prob_color  = _prob_hex(prediction["predicted_prob_logistic"])
 
     subject = (
         f"Bike alert: {station} at {pred_str} -- "
@@ -295,7 +286,6 @@ def _send_email(sub: dict, prediction: dict):
         "html": content["html"],
         "text": content["text"],
         "headers": {
-            # Gmail shows a native unsubscribe button when this header is present
             "List-Unsubscribe": f"<{APP_URL}/signup>",
         },
     })
@@ -311,13 +301,12 @@ def main():
     parser.add_argument(
         "--test",
         action="store_true",
-        help="Skip hour filter and dedup check — sends to all eligible subscribers immediately.",
+        help="Skip time filter and dedup — sends to all eligible subscribers immediately.",
     )
     args = parser.parse_args()
 
     now_et = datetime.now(ET)
-    today = now_et.date()
-    # Round to nearest 30-min slot (00 or 30)
+    today  = now_et.date()
     slot_min = 0 if now_et.minute < 30 else 30
     current_slot_et = f"{now_et.hour:02d}:{slot_min:02d}"
     log.info(
@@ -331,83 +320,60 @@ def main():
         log.error("RESEND_API_KEY not set -- cannot send emails. Exiting.")
         sys.exit(1)
 
-    conn = _snowflake_conn()
-    cur = conn.cursor()
+    client = _bq_client()
+    _ensure_sent_alerts_table(client)
 
-    try:
-        _ensure_sent_alerts_table(cur)
+    rows = _get_alerts_to_send(client, current_slot_et, test_mode=args.test)
+    log.info("%d prediction row(s) match slot %s", len(rows), current_slot_et)
 
-        rows = _get_alerts_to_send(cur, current_slot_et, test_mode=args.test)
-        log.info("%d prediction row(s) match slot %s", len(rows), current_slot_et)
+    # Group by (email, station_id) — each signup inserts 6 rows (one per horizon)
+    # but all need exactly ONE email per day.
+    grouped: dict[tuple, dict] = {}
+    for row in rows:
+        key = (row["email"], row["station_id"])
+        if key not in grouped:
+            grouped[key] = {"sub": row, "horizons": []}
+        grouped[key]["horizons"].append(row)
 
-        # Group by (email, station_id) — each signup inserts 6 rows (one per horizon)
-        # but all share the same email/station/times and need exactly ONE email.
-        # Use the smallest subscriber_id in each group for dedup tracking.
-        grouped: dict[tuple, dict] = {}
-        for row in rows:
-            key = (row["email"], row["station_id"])
-            if key not in grouped:
-                grouped[key] = {
-                    "sub": row,
-                    "horizons": [],
-                    "sub_id": int(row["subscriber_id"]),
-                }
-            grouped[key]["horizons"].append(row)
+    sent = skipped = errors = 0
 
-        sent = skipped = errors = 0
+    for (email, station_id), data in grouped.items():
+        sub          = data["sub"]
+        horizon_rows = data["horizons"]
 
-        for key, data in grouped.items():
-            sub = data["sub"]
-            horizon_rows = data["horizons"]
-            sub_id = data["sub_id"]
+        if not args.test and _already_sent(client, email, station_id, today):
+            log.info("Skip (already sent today): %s / %s", email, sub.get("station_name"))
+            skipped += 1
+            continue
 
-            if not args.test and _already_sent(cur, sub_id, today):
-                log.info(
-                    "Skip (already sent today): sub %d / %s / %s",
-                    sub_id,
-                    sub["email"],
-                    sub["station_name"],
-                )
-                skipped += 1
-                continue
+        target_min = (
+            _hhmm_to_minutes(sub["prediction_time"])
+            - _hhmm_to_minutes(sub["target_time"])
+            + 1440
+        ) % 1440
 
-            # Compute target horizon: how far ahead is prediction_time from target_time?
-            target_min = (
-                _hhmm_to_minutes(sub["prediction_time"])
-                - _hhmm_to_minutes(sub["target_time"])
-                + 1440
-            ) % 1440
+        prediction = _interpolate(horizon_rows, target_min)
+        if not prediction:
+            log.warning("No prediction data for %s / %s -- skipping", email, sub.get("station_name"))
+            continue
 
-            prediction = _interpolate(horizon_rows, target_min)
-            if not prediction:
-                log.warning(
-                    "No prediction data for sub %d (%s) -- skipping",
-                    sub_id,
-                    sub["station_name"],
-                )
-                continue
+        try:
+            _send_email(sub, prediction)
+            _record_sent(client, email, station_id, today)
+            log.info(
+                "Sent -> %s | %s | alert %s / pred %s | %d%%",
+                email,
+                sub.get("station_name"),
+                sub["target_time"],
+                sub["prediction_time"],
+                round(prediction["predicted_prob_logistic"] * 100),
+            )
+            sent += 1
+        except Exception as exc:
+            log.error("Failed %s / %s: %s", email, sub.get("station_name"), exc)
+            errors += 1
 
-            try:
-                _send_email(sub, prediction)
-                _record_sent(cur, sub_id, today)
-                log.info(
-                    "Sent -> %s | %s | alert %s / pred %s | %d%%",
-                    sub["email"],
-                    sub["station_name"],
-                    sub["target_time"],
-                    sub["prediction_time"],
-                    round(prediction["predicted_prob_logistic"] * 100),
-                )
-                sent += 1
-            except Exception as exc:
-                log.error("Failed sub %d (%s): %s", sub_id, sub["email"], exc)
-                errors += 1
-
-        log.info("Done -- %d sent, %d skipped (dup), %d errors", sent, skipped, errors)
-
-    finally:
-        cur.close()
-        conn.close()
+    log.info("Done -- %d sent, %d skipped (dup), %d errors", sent, skipped, errors)
 
 
 if __name__ == "__main__":
