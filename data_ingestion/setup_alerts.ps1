@@ -3,7 +3,7 @@
 # Run once as Administrator.
 
 $ProjectRoot = "C:\Users\clark\Desktop\citibike"
-$PythonW     = "C:\Users\clark\AppData\Local\Programs\Python\Python312\pythonw.exe"
+$PythonW     = "C:\Users\clark\AppData\Local\Programs\Python\Python39\pythonw.exe"
 $Script      = "$ProjectRoot\data_ingestion\send_alerts.py"
 $LogFile     = "$ProjectRoot\data_ingestion\alerts.log"
 
