@@ -31,9 +31,11 @@ const INPUT_CLASS =
 export default function SignupForm({
   initialStationId,
   unsubStationId = "",
+  unsubEmailFromUrl = "",
 }: {
   initialStationId: string;
   unsubStationId?: string;
+  unsubEmailFromUrl?: string;
 }) {
   const [stations, setStations] = useState<StationOption[]>([]);
   const [stationsError, setStationsError] = useState(false);
@@ -47,7 +49,7 @@ export default function SignupForm({
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
   // Unsubscribe form state
-  const [unsubEmail, setUnsubEmail] = useState("");
+  const [unsubEmail, setUnsubEmail] = useState(unsubEmailFromUrl);
   const [unsubStatus, setUnsubStatus] = useState<"idle" | "submitting" | "done" | "error">("idle");
   const [unsubError, setUnsubError] = useState("");
 
@@ -127,17 +129,11 @@ export default function SignupForm({
     }
   }
 
-  async function handleUnsubscribe(e: React.FormEvent) {
-    e.preventDefault();
-    setUnsubError("");
-    if (!unsubEmail.trim()) {
-      setUnsubError("Enter your email address.");
-      return;
-    }
+  async function performUnsubscribe(emailVal: string, stationIdVal: string) {
     setUnsubStatus("submitting");
     try {
-      const body: Record<string, string> = { email: unsubEmail.trim() };
-      if (unsubStationId) body.station_id = unsubStationId;
+      const body: Record<string, string> = { email: emailVal };
+      if (stationIdVal) body.station_id = stationIdVal;
       const res = await fetch("/api/unsubscribe", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -154,6 +150,25 @@ export default function SignupForm({
       setUnsubStatus("error");
       setUnsubError("Network error. Try again.");
     }
+  }
+
+  // Auto-unsubscribe when email + station come from the email link
+  useEffect(() => {
+    if (unsubEmailFromUrl && unsubStationId) {
+      performUnsubscribe(unsubEmailFromUrl, unsubStationId);
+    }
+    // Only run once on mount
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  async function handleUnsubscribe(e: React.FormEvent) {
+    e.preventDefault();
+    setUnsubError("");
+    if (!unsubEmail.trim()) {
+      setUnsubError("Enter your email address.");
+      return;
+    }
+    await performUnsubscribe(unsubEmail.trim(), unsubStationId);
   }
 
   return (
@@ -290,16 +305,12 @@ export default function SignupForm({
         <h2 className="mb-1 text-base font-semibold">
           {unsubStationId ? "Unsubscribe from this station" : "Unsubscribe from alerts"}
         </h2>
-        <p className="mb-4 text-sm text-zinc-500 dark:text-zinc-400">
-          {unsubStationId
-            ? unsubStationName
-              ? `Enter the email you signed up with to stop alerts for ${unsubStationName}.`
-              : "Enter the email you signed up with to stop alerts for this station."
-            : "Enter the email you signed up with to stop all alerts."}
-        </p>
-        {unsubStatus === "done" ? (
+
+        {unsubStatus === "submitting" && unsubEmailFromUrl ? (
+          <p className="text-sm text-zinc-500 dark:text-zinc-400">Unsubscribing...</p>
+        ) : unsubStatus === "done" ? (
           <p className="text-sm text-green-700 dark:text-green-400">
-            &#10003; Done.{" "}
+            &#10003;{" "}
             {unsubStationId
               ? unsubStationName
                 ? `You won't receive alerts for ${unsubStationName} anymore.`
@@ -309,29 +320,38 @@ export default function SignupForm({
             <a href="/signup" className="underline">Manage other alerts</a>
           </p>
         ) : (
-          <form onSubmit={handleUnsubscribe} className="space-y-3">
-            <input
-              type="email"
-              value={unsubEmail}
-              onChange={(e) => setUnsubEmail(e.target.value)}
-              placeholder="you@example.com"
-              className={INPUT_CLASS}
-            />
-            {unsubError && (
-              <p className="text-sm text-red-600 dark:text-red-400">{unsubError}</p>
-            )}
-            <button
-              type="submit"
-              disabled={unsubStatus === "submitting"}
-              className="w-full rounded-lg border border-black/15 px-4 py-2 text-sm font-medium hover:bg-zinc-100 disabled:opacity-60 dark:border-white/20 dark:hover:bg-zinc-800"
-            >
-              {unsubStatus === "submitting"
-                ? "Unsubscribing..."
-                : unsubStationId
-                ? "Unsubscribe from this station"
-                : "Unsubscribe from all alerts"}
-            </button>
-          </form>
+          <>
+            <p className="mb-4 text-sm text-zinc-500 dark:text-zinc-400">
+              {unsubStationId
+                ? unsubStationName
+                  ? `Enter the email you signed up with to stop alerts for ${unsubStationName}.`
+                  : "Enter the email you signed up with to stop alerts for this station."
+                : "Enter the email you signed up with to stop all alerts."}
+            </p>
+            <form onSubmit={handleUnsubscribe} className="space-y-3">
+              <input
+                type="email"
+                value={unsubEmail}
+                onChange={(e) => setUnsubEmail(e.target.value)}
+                placeholder="you@example.com"
+                className={INPUT_CLASS}
+              />
+              {unsubError && (
+                <p className="text-sm text-red-600 dark:text-red-400">{unsubError}</p>
+              )}
+              <button
+                type="submit"
+                disabled={unsubStatus === "submitting"}
+                className="w-full rounded-lg border border-black/15 px-4 py-2 text-sm font-medium hover:bg-zinc-100 disabled:opacity-60 dark:border-white/20 dark:hover:bg-zinc-800"
+              >
+                {unsubStatus === "submitting"
+                  ? "Unsubscribing..."
+                  : unsubStationId
+                  ? "Unsubscribe from this station"
+                  : "Unsubscribe from all alerts"}
+              </button>
+            </form>
+          </>
         )}
       </div>
     </div>
