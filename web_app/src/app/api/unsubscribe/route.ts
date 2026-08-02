@@ -69,14 +69,17 @@ export async function POST(request: Request) {
       seen.add(sid);
 
       await bq.query({
-        query: `INSERT INTO ${unsub} (email, station_id, station_name, target_time, subscribed_at, unsubscribed_at)
-                VALUES (@email, @station_id, @station_name, @target_time, @subscribed_at, CURRENT_TIMESTAMP())`,
+        query: `INSERT INTO ${unsub} (email, station_id, subscribed_at, unsubscribed_at)
+                VALUES (@email, @station_id, @subscribed_at, CURRENT_TIMESTAMP())`,
         params: {
           email,
           station_id:    sid,
-          station_name:  row.station_name != null ? String(row.station_name) : null,
-          target_time:   row.target_time  != null ? String(row.target_time)  : null,
           subscribed_at: row.created_at?.value ?? row.created_at ?? null,
+        },
+        types: {
+          email:         "STRING",
+          station_id:    "STRING",
+          subscribed_at: "TIMESTAMP",
         },
       });
     }
