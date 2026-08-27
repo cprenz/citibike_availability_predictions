@@ -24,6 +24,7 @@ export async function GET() {
     WITH latest AS (
       SELECT station_id, MAX(predicted_at) AS max_at
       FROM \`${PROJECT}.${DATASET}.model_predictions\`
+      WHERE DATE(predicted_at) >= DATE_SUB(CURRENT_DATE(), INTERVAL 2 DAY)
       GROUP BY station_id
     )
     SELECT

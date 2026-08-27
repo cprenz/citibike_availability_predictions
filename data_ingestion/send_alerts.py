@@ -117,6 +117,7 @@ def _get_alerts_to_send(client, current_slot_et: str, test_mode: bool = False) -
         WITH latest AS (
             SELECT station_id, MAX(predicted_at) AS max_predicted_at
             FROM   {tbl("model_predictions")}
+            WHERE  DATE(predicted_at) >= DATE_SUB(CURRENT_DATE(), INTERVAL 2 DAY)
             GROUP BY station_id
         )
         SELECT
