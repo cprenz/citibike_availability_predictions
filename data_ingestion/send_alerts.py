@@ -114,6 +114,11 @@ def _get_alerts_to_send(client, current_slot_et: str, test_mode: bool = False) -
     # BigQuery does not allow correlated subqueries in JOIN predicates, so we
     # pre-compute the latest predicted_at per station in a CTE first.
     query = f"""
+        WITH max_ts AS (
+            SELECT MAX(predicted_at) AS latest
+            FROM   {tbl("model_predictions")}
+            WHERE  predicted_at >= TIMESTAMP(DATE_SUB(CURRENT_DATE(), INTERVAL 1 DAY))
+        )
         SELECT
             s.email,
             s.station_id,
@@ -125,16 +130,13 @@ def _get_alerts_to_send(client, current_slot_et: str, test_mode: bool = False) -
             mp.predicted_value_lgbm,
             mp.pi_lower,
             mp.pi_upper
-        FROM {tbl("subscribers")} s
-        JOIN {tbl("station_information")} si
-            ON si.station_id = s.station_id
+        FROM max_ts
         JOIN {tbl("model_predictions")} mp
-            ON mp.station_id = s.station_id
-           AND mp.predicted_at = (
-               SELECT MAX(predicted_at)
-               FROM   {tbl("model_predictions")}
-               WHERE  predicted_at >= TIMESTAMP(DATE_SUB(CURRENT_DATE(), INTERVAL 1 DAY))
-           )
+            ON mp.predicted_at = max_ts.latest
+        JOIN {tbl("subscribers")} s
+            ON s.station_id = mp.station_id
+        JOIN {tbl("station_information")} si
+            ON si.station_id = mp.station_id
         WHERE s.email           IS NOT NULL
           AND s.target_time     IS NOT NULL
           AND s.prediction_time IS NOT NULL
