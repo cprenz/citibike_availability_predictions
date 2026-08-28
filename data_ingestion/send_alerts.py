@@ -133,6 +133,7 @@ def _get_alerts_to_send(client, current_slot_et: str, test_mode: bool = False) -
         FROM max_ts
         JOIN {tbl("model_predictions")} mp
             ON mp.predicted_at = max_ts.latest
+           AND mp.predicted_at >= TIMESTAMP(DATE_SUB(CURRENT_DATE(), INTERVAL 1 DAY))
         JOIN {tbl("subscribers")} s
             ON s.station_id = mp.station_id
         JOIN {tbl("station_information")} si

@@ -42,6 +42,7 @@ export async function GET() {
       FROM \`${PROJECT}.${DATASET}.model_predictions\`
       WHERE predicted_at >= TIMESTAMP(DATE_SUB(CURRENT_DATE(), INTERVAL 1 DAY))
     )
+    AND mp.predicted_at >= TIMESTAMP(DATE_SUB(CURRENT_DATE(), INTERVAL 1 DAY))
     AND si.lat IS NOT NULL AND si.lon IS NOT NULL
     ORDER BY mp.station_id, mp.horizon_minutes
   `;
