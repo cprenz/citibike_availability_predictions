@@ -21,12 +21,6 @@ function getBQ(): BigQuery {
 export async function GET() {
   const bq = getBQ();
   const query = `
-    WITH latest AS (
-      SELECT station_id, MAX(predicted_at) AS max_at
-      FROM \`${PROJECT}.${DATASET}.model_predictions\`
-      WHERE DATE(predicted_at) >= DATE_SUB(CURRENT_DATE(), INTERVAL 2 DAY)
-      GROUP BY station_id
-    )
     SELECT
       mp.station_id,
       si.name                     AS station_name,
@@ -41,11 +35,14 @@ export async function GET() {
       mp.pi_upper,
       mp.predicted_at
     FROM \`${PROJECT}.${DATASET}.model_predictions\` mp
-    JOIN latest l
-      ON l.station_id = mp.station_id AND l.max_at = mp.predicted_at
     JOIN \`${PROJECT}.${DATASET}.station_information\` si
       ON si.station_id = mp.station_id
-    WHERE si.lat IS NOT NULL AND si.lon IS NOT NULL
+    WHERE mp.predicted_at = (
+      SELECT MAX(predicted_at)
+      FROM \`${PROJECT}.${DATASET}.model_predictions\`
+      WHERE predicted_at >= TIMESTAMP(DATE_SUB(CURRENT_DATE(), INTERVAL 1 DAY))
+    )
+    AND si.lat IS NOT NULL AND si.lon IS NOT NULL
     ORDER BY mp.station_id, mp.horizon_minutes
   `;
 
