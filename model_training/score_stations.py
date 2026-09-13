@@ -39,17 +39,16 @@ HORIZONS = [60, 180, 360, 720, 1440, 2880]
 HORIZON_LABELS = {60: "1hr", 180: "3hr", 360: "6hr",
                   720: "12hr", 1440: "24hr", 2880: "multi-day"}
 
-# Platt-calibrated probability thresholds chosen from the 2.09 precision/recall sweep.
-# Precision at each threshold is comfortably above the ~91.8% base rate; empty-station
-# recall ranges from 26% (multi-day) to 50% (1hr). Web app: flag a station "available"
-# when predicted_prob_logistic >= the threshold for that horizon.
+# Platt-calibrated probability thresholds from the 3.01 retrain (Aug 2026 holdout).
+# Chosen to maximize F1 subject to precision > base rate (0.926). Web app: flag a
+# station "available" when predicted_prob_logistic >= the threshold for that horizon.
 PLATT_THRESHOLDS = {
-    60:   0.41,
-    180:  0.42,
-    360:  0.45,
-    720:  0.43,
-    1440: 0.46,
-    2880: 0.50,
+    60:   0.44,
+    180:  0.52,
+    360:  0.53,
+    720:  0.51,
+    1440: 0.52,
+    2880: 0.55,
 }
 
 # Cap on how many missed hourly runs get auto-replayed on startup. A multi-day
