@@ -25,7 +25,7 @@ A system that:
 ## How It Works
 
 **1. Data collection**
-An automated script polls the Citi Bike API every 2.5 minutes around the clock and saves each reading to a local database. I also pull hourly weather forecasts and historical trip data going back to 2019 — over 160 million data points in total.
+An automated script polls the Citi Bike API every 2.5 minutes around the clock and saves each reading to a local database. I also pull hourly weather forecasts and historical trip data going back to 2019 — over 160 million data points in total. The three data sources are Citi Bike station status (live availability every 2.5 minutes), Open-Meteo weather (observed and forecast), and MTA subway entrance locations from NYC Open Data (used to measure each station's transit connectivity).
 
 **2. Model training**
 I trained 18 machine learning models, one for each combination of prediction window (1 hour out, 3 hours out, and so on) and model type. The models learn from patterns like: how full is this station right now, what's the weather forecast, what time is it, and how close is the nearest subway entrance.
@@ -109,6 +109,31 @@ flowchart LR
 
 ---
 
+## The Web App
+
+**[bikepredict.fyi](https://bikepredict.fyi)** — built with Next.js, deployed on Vercel, data from Snowflake.
+
+<img src="reports/screenshots/map_popup.png" width="800" alt="Station popup showing 6-horizon predictions">
+
+<img src="reports/screenshots/ride_explorer.png" width="800" alt="Ride Explorer 3D bar map showing rides by borough">
+
+**Four pages:**
+- **`/`** — live map of all ~2,400 stations, color-coded green (likely available) / amber / red (likely empty). Click any dot to see the full prediction breakdown across all six time horizons, with an inline alert signup.
+- **`/station/:id`** — detail view for a single station: all six predictions, a confidence range, and a departure-time picker.
+- **`/dashboard`** — analytics dashboard built in Tableau Public and embedded via iframe. Seven charts: total rides over time by borough, member vs. casual split, e-bike vs. classic split, rides by hour of day, rides by day of week, top stations ranked, and a station map sized by ridership. The data pipeline runs from BigQuery through Google Sheets into Tableau, so the dashboard refreshes nightly without any manual export. [View live dashboard](https://public.tableau.com/app/profile/clark.prenz/viz/citibike_dashboard_v1/Dashboard1)
+
+<img src="reports/screenshots/dashboard.png" width="800" alt="Tableau analytics dashboard">
+
+The **Ride Explorer** (on the main map page) is a separate interactive 3D bar map built with deck.gl. Each bar represents one station, and the height shows average rides for whatever combination of year, month, day of week, and hour you select. The data sits in a pre-aggregated BigQuery table with about 18.8 million rows covering 2019, 2021, and 2026. You can filter by bike type (e-bike vs. classic), rider type (member vs. casual), and borough, and switch between that view and the live prediction map without leaving the page.
+
+- **`/signup`** — email alert signup.
+
+<img src="reports/screenshots/signup.png" width="800" alt="Email alert signup page">
+
+A Meta ad campaign is running to drive signups, with conversion tracked end-to-end through GA4 and the Meta Pixel.
+
+---
+
 ## Results
 
 | Prediction window | Typical error | AUC | Precision at threshold |
@@ -173,31 +198,6 @@ Full writeup in [`notebooks/1.01`](notebooks/1.01-hypothesis-ebike-rush-hour.ipy
 
 ---
 
-## The Web App
-
-**[bikepredict.fyi](https://bikepredict.fyi)** — built with Next.js, deployed on Vercel, data from Snowflake.
-
-<img src="reports/screenshots/map_popup.png" width="800" alt="Station popup showing 6-horizon predictions">
-
-<img src="reports/screenshots/ride_explorer.png" width="800" alt="Ride Explorer 3D bar map showing rides by borough">
-
-**Four pages:**
-- **`/`** — live map of all ~2,400 stations, color-coded green (likely available) / amber / red (likely empty). Click any dot to see the full prediction breakdown across all six time horizons, with an inline alert signup.
-- **`/station/:id`** — detail view for a single station: all six predictions, a confidence range, and a departure-time picker.
-- **`/dashboard`** — analytics dashboard built in Tableau Public and embedded via iframe. Seven charts: total rides over time by borough, member vs. casual split, e-bike vs. classic split, rides by hour of day, rides by day of week, top stations ranked, and a station map sized by ridership. The data pipeline runs from BigQuery through Google Sheets into Tableau, so the dashboard refreshes nightly without any manual export. [View live dashboard](https://public.tableau.com/app/profile/clark.prenz/viz/citibike_dashboard_v1/Dashboard1)
-
-<img src="reports/screenshots/dashboard.png" width="800" alt="Tableau analytics dashboard">
-
-The **Ride Explorer** (on the main map page) is a separate interactive 3D bar map built with deck.gl. Each bar represents one station, and the height shows average rides for whatever combination of year, month, day of week, and hour you select. The data sits in a pre-aggregated BigQuery table with about 18.8 million rows covering 2019, 2021, and 2026. You can filter by bike type (e-bike vs. classic), rider type (member vs. casual), and borough, and switch between that view and the live prediction map without leaving the page.
-
-- **`/signup`** — email alert signup.
-
-<img src="reports/screenshots/signup.png" width="800" alt="Email alert signup page">
-
-A Meta ad campaign is running to drive signups, with conversion tracked end-to-end through GA4 and the Meta Pixel.
-
----
-
 ## Ad Campaign
 
 I ran a $50 Meta pilot to test whether the model was something real users would actually pay attention to.
@@ -236,7 +236,7 @@ citibike/
 
 ## About
 
-I'm Clark, a real estate investing analyst in NYC who taught myself to build this end-to-end. I worked through the same problems a marketplace company faces: how do you predict a resource that runs out, and how do you get real users to notice you've solved it?
+I'm Clark, a real estate analyst in NYC. I built this end-to-end as a self-directed project. If you have questions about any part of it, reach out.
 
 clark.prenz@gmail.com · [bikepredict.fyi](https://bikepredict.fyi)
 
